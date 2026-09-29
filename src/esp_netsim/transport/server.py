@@ -20,10 +20,6 @@ class Connection:
         self._decoder = FrameDecoder()
         self.node_id: Optional[int] = None
 
-    @property
-    def peername(self):
-        return self._writer.get_extra_info("peername")
-
     async def send(self, msg: Message) -> None:
         self._writer.write(encode_frame(msg))
         await self._writer.drain()

@@ -112,29 +112,11 @@ def parse_scenario(doc: dict, base_dir: str = ".") -> ScenarioConfig:
     if not isinstance(raw_nodes, list) or not raw_nodes:
         raise ValueError("scenario.nodes must be a non-empty list")
 
-    nodes = []
-    seen_ids, seen_macs = set(), set()
-    for i, rn in enumerate(raw_nodes):
-        ctx = f"nodes[{i}]"
-        nid = int(_require(rn, "id", ctx))
-        mac = normalize_mac(_require(rn, "mac", ctx))
-        if nid < 1:
-            raise ValueError(f"{ctx}: node ids start at 1 (0 is the access point)")
-        if nid in seen_ids:
-            raise ValueError(f"{ctx}: duplicate node id {nid}")
-        if mac in seen_macs:
-            raise ValueError(f"{ctx}: duplicate mac {mac}")
-        seen_ids.add(nid)
-        seen_macs.add(mac)
-        pos = rn.get("pos", [0.0, 0.0, 0.0])
-        if not isinstance(pos, (list, tuple)) or len(pos) < 2:
-            raise ValueError(f"{ctx}.pos must be [x, y] or [x, y, z]")
-        z = float(pos[2]) if len(pos) > 2 else 0.0
-        nodes.append(NodeConfig(node_id=nid, mac=mac, x=float(pos[0]), y=float(pos[1]),
-                                z=z, channel=int(rn.get("channel", 1)),
-                                firmware=_parse_firmware(rn.get("firmware"), base_dir, ctx),
-                                wifi=bool(rn.get("wifi", False))))
-
+    nodes = [_parse_node(rn, f"nodes[{i}]", base_dir) for i, rn in enumerate(raw_nodes)]
+    for kind, values in (("node id", [n.node_id for n in nodes]), ("mac", [n.mac for n in nodes])):
+        dupes = {v for v in values if values.count(v) > 1}
+        if dupes:
+            raise ValueError(f"scenario.nodes: duplicate {kind} {sorted(dupes)[0]}")
     ap = _parse_ap(doc.get("wifi_ap"), nodes)
 
     run = doc.get("run", {})
@@ -151,6 +133,21 @@ def parse_scenario(doc: dict, base_dir: str = ".") -> ScenarioConfig:
                                      {n.node_id for n in nodes if n.firmware is None})),
         ap=ap,
     )
+
+
+def _parse_node(rn: dict, ctx: str, base_dir: str) -> NodeConfig:
+    nid = int(_require(rn, "id", ctx))
+    if nid < 1:
+        raise ValueError(f"{ctx}: node ids start at 1 (0 is the access point)")
+    pos = rn.get("pos", [0.0, 0.0, 0.0])
+    if not isinstance(pos, (list, tuple)) or len(pos) < 2:
+        raise ValueError(f"{ctx}.pos must be [x, y] or [x, y, z]")
+    return NodeConfig(node_id=nid, mac=normalize_mac(_require(rn, "mac", ctx)),
+                      x=float(pos[0]), y=float(pos[1]),
+                      z=float(pos[2]) if len(pos) > 2 else 0.0,
+                      channel=int(rn.get("channel", 1)),
+                      firmware=_parse_firmware(rn.get("firmware"), base_dir, ctx),
+                      wifi=bool(rn.get("wifi", False)))
 
 
 def _parse_traffic(raw: Any, valid_ids: set) -> list:

@@ -13,7 +13,6 @@ from .channel.pathloss import LogDistancePropagationLoss, LinkBudget
 from .channel.error_model import ErrorRateModel, SnrPerErrorModel, ReceptionContext
 from .channel.airtime import AirtimeModel
 
-ESP_NOW_MAX_DATA_LEN = 250  # v1.0; v2.0 is 1470 (needs IDF>=5.4.2)
 AP_NODE_ID = 0              # scenario node ids start at 1
 
 
@@ -33,7 +32,6 @@ class NodeState:
     y: float = 0.0
     z: float = 0.0
     channel: int = 1
-    wifi_started: bool = True   # esp_wifi_start must precede TX (brief §3)
     espnow: bool = True         # False for the access point, which ignores ESP-NOW
     peers: dict = field(default_factory=dict)  # mac -> PeerInfo
 
@@ -97,7 +95,6 @@ class MediumConfig:
     capture_threshold_db: float = 4.0   # min SINR to capture a frame (brief §3/§5)
     cca_threshold_dbm: float = -82.0    # 802.11 preamble-detect level: at or above, a sender defers
     max_retries: int = 3                # unicast MAC retransmissions (brief §3)
-    max_data_len: int = ESP_NOW_MAX_DATA_LEN
     seed: int = 0
 
 
@@ -118,12 +115,6 @@ class MediumEngine:
         self._nodes[node_id] = ns
         self._by_mac[mac] = node_id
         return ns
-
-    def set_position(self, node_id: int, x: float, y: float, z: float = 0.0) -> None:
-        self._nodes[node_id] = replace(self._nodes[node_id], x=x, y=y, z=z)
-
-    def set_channel(self, node_id: int, channel: int) -> None:
-        self._nodes[node_id] = replace(self._nodes[node_id], channel=channel)
 
     def add_peer(self, node_id: int, peer_mac: str, channel: int = 0,
                  encrypt: bool = False, lmk: Optional[bytes] = None) -> None:
@@ -157,7 +148,7 @@ class MediumEngine:
 
         # Register as in-flight ONLY the frames that actually radiated. Frames
         # rejected before transmission (peer_not_exist / channel_mismatch /
-        # wifi_not_started / encrypt_no_matching_lmk) emit no RF energy and must not
+        # encrypt_no_matching_lmk) emit no RF energy and must not
         # interfere with later frames (review BUG-1). attempts>0 == "went on the air".
         for idx, outcome in enumerate(outcomes):
             if outcome.attempts > 0:
@@ -232,12 +223,6 @@ class MediumEngine:
 
     def _evaluate_frame(self, f: Frame, airtime_us: int,
                         window: tuple[int, int], interference: "_Interference") -> TxOutcome:
-        src = self._nodes[f.src_node]
-
-        # Precondition: Wi-Fi must be started to transmit (brief §3).
-        if not src.wifi_started:
-            return TxOutcome(f, "fail", airtime_us, 0, [], "wifi_not_started")
-
         if f.broadcast:
             # Broadcast is unacknowledged, so the whole airtime is the frame (no ACK
             # tail); the data lands at the end of airtime.

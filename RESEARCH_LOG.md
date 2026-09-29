@@ -800,6 +800,10 @@ to be timed, would contaminate the latency numbers (reviewer). Binary removes th
 
 ## D-022 — Guest virtual-time source: the TX `t` field = guest `esp_timer` micros
 
+> **Superseded by V-010 / D-029.** The guest clock does freeze on `stop`, but while running it
+> does not advance at the host rate, and two identical guests drift apart. The medium no longer
+> uses `t` for QEMU frames.
+
 **Context.** The first real TX from firmware carried `t: 0` (the shim hardcoded it). Before the
 barrier spike, the guest↔medium time relationship must be decided, because it shapes the whole
 barrier design (reviewer). Options: (a) guest's own `esp_timer_get_time()` µs; (b) echo the slice
@@ -920,6 +924,10 @@ computed value) needs the two-node barrier↔medium integration and is the next 
 ---
 
 ## V-008 / D-025 — Latency fidelity MEASURED: risk #1 retired (needs a 250 µs slice)
+
+> **Revised by V-010.** This modeled the slice as exactly 250 µs of guest time. Measured end to
+> end, a slice is 1.5–4 ms of guest time because the guest keeps running through the QMP round
+> trips, so the 14.3 % figure does not describe what firmware observes.
 
 **Context.** The last axis of D-023: is the ESP-NOW latency a node observes under the barrier
 within ±20% of the medium's computed value? This exercises D-014 (barrier dispatch quantization)
@@ -1059,479 +1067,318 @@ deleted subjects). Kept `ErrorRateModel` (two impls, meets the two-caller bar) a
 
 ---
 
-## Status snapshot (honest, post-correction — see D-019, D-020, D-021)
+## D-028 — One firmware image, many nodes: identity in NVS, unmodified apps
 
-- **Built and unit-tested (software only):** the wireless medium, barrier orchestration,
-  wire protocol, tracing, config, CLI — 54 tests, exercised against `MockNode`, a Python
-  stand-in. **No ESP-IDF firmware has run.** This is a medium/orchestration harness, not
-  milestone completion.
-- **Written but UNVERIFIED:** `firmware/espnet_shim` (never compiled), `qemu_launcher.py`
-  (never run). These are the three risk items (barrier/transport/linkage) — untested.
-- **M1 DONE (real firmware):** ESP-IDF v5.4.2 `hello_world` booted on emulated `esp32s3` under
-  Espressif QEMU 9.0.0 in WSL2; genuine UART captured (`docs/m1_qemu_boot.log`, D-020/V-002).
-- **Spike #3 (shim linkage) DONE:** `--wrap` interposes the app's `esp_now_*` to our shim,
-  confirmed on-target (D-021/V-003).
-- **Spike #2 (transport) DONE:** real firmware's HELLO + ESP-NOW TX decoded by the host medium
-  codec over open_eth+NAT (V-004, `docs/spike2_evidence.log`). Node app committed at
-  `firmware/examples/espnet_node/`.
-- **Binary wire body DONE (V-005):** C shim + Python emit/parse binary; proven on-target.
-- **Spike #1 barrier — 2 of 3 axes validated:** clock-freeze CONFIRMED (V-006), throughput PASS
-  (V-007: 421 slices/s @1 ms). Remaining: latency fidelity (two-node barrier↔medium integration).
-- **Next:** two-node latency-fidelity measurement (finish D-023) → rerun `two_node.yaml` with one
-  QEMU node + one MockNode = first *honest* M2.
-- **V-001:** self-consistency units check (inputs determine the ~200 m output), *not* hardware
-  validation.
+**Context.** M2 so far ran one real node, with its node ID compiled in (`ESPNET_NODE_ID`). The
+brief's workflow ("firmware A on nodes 1-10") needs one build to serve many nodes, and the
+firmware should be "the same, or as close as practical to the same" as on hardware (PDF).
+
+**Options.** (a) Rebuild per node with a `-D` flag: slow, and 20 builds for 20 nodes. (b) Patch
+bytes in the app image: breaks the image checksum and SHA-256. (c) Write a per-node NVS
+partition. (d) Let the medium assign IDs by connection order: fragile once nodes boot in
+parallel.
+
+**Decision.** (c). The runner merges each node's ESP-IDF build into a 4 MB flash image and
+writes an NVS partition (namespace `espnet`: `node_id`, `mac`, `channel`, `port`) at the
+offset the build's own partition table gives. The NVS partition is not hash-checked, and NVS
+is where a real deployment would keep identity. It is generated with Espressif's
+`esp-idf-nvs-partition-gen` (pip) rather than by hand-encoding NVS pages.
+
+The shim now starts itself inside `esp_now_init` (NVS identity, open_eth + DHCP, connect to the
+medium, HELLO), and `--wrap`s the Wi-Fi bring-up an ESP-NOW app makes on hardware
+(`esp_wifi_init`, `set_storage`, `set_mode`, `start`, `set_channel`) into no-ops. An app written
+exactly like Espressif's ESP-NOW example therefore builds and runs unmodified; only the project
+`CMakeLists.txt` adds the shim component. `-DESPNET_HARDWARE=1` builds the same app for boards.
+
+Shim rewrite, per `CLAUDE.md`: packed structs for every wire message instead of hand-written byte
+writers; the transport folded into the shim (one backend, no interface); static FreeRTOS
+allocation. Two bugs fixed on the way: the receive callback was handed raw MAC bytes cast to
+`esp_now_recv_info_t*` (any app reading `info->src_addr` would crash); it now gets a real struct
+with `rx_ctrl->rssi`. And the length prefix and body went out as two `send()` calls with Nagle
+on; now one call with `TCP_NODELAY`.
+
+Firmware examples: A `espnow_ping` (broadcast a timestamped ping every 100 ms, log each reply's
+RTT), B `espnow_pong` (answer each ping with a unicast reply, from a task, since sending from the
+receive callback is discouraged on hardware). `espnet_node` is deleted; A replaces it.
+
+**Sources.** PDF ("same firmware"); ESP-IDF NVS and ESP-NOW example; D-017, D-021.
+
+---
+
+## D-029 / V-010 — Guest clocks are not host time under stop/cont; stamp by slice instead
+
+**Context.** First run of two real nodes (M2, ping/pong, 250 µs slices). The pong's reply went
+out 19–27 ms after the ping was delivered, and the lag grew with run time.
+
+**Measurement 1: the slice is not 250 µs of guest time.** 6 s of virtual time took ~3,000 slices:
+each "250 µs" slice advanced the guests ~2 ms. The guest keeps running through the QMP `cont`
+and `stop` round trips (V-007 measured ~0.8 ms of overhead per cycle for one node; with several
+nodes it is more). `slice_us: 50` gave the same slice count and the same RTT, so below the QMP
+floor `slice_us` does not matter. The CLI now prints the effective quantum; measured:
+2.0 ms (2 nodes), 2.4 ms (5), 2.1 ms (3, Wi-Fi), 3.7 ms (20).
+
+**Measurement 2: guest clocks drift from host time and from each other.** Logging each TX's
+guest `t` against the host's own estimate of running time (reply-to-reply of `cont` and `stop`):
+node 1's `esp_timer` advanced at 0.96 of the host estimate and node 2's at 0.85, and by the end
+the two guests' clocks were 200–350 ms apart. Both run identical boot code in the same host
+windows, so D-022's premise (`esp_timer` equals granted virtual time) does not hold across
+nodes. Separately, the FreeRTOS tick falls behind `esp_timer` under stop/cont, so `vTaskDelay`
+and log timestamps stretch (a 100 ms ping loop measured 130–150 ms by `esp_timer`).
+
+**Decision.**
+1. The medium stamps a QEMU node's frame with the virtual time of the slice it arrived in, not
+   the guest's `t`. Sub-slice ordering is lost, but every node shares one timeline.
+2. Virtual time advances by the measured guest running time per slice (mean over nodes of
+   `stop` reply minus `cont` reply; QEMU applies both just before replying), not by the nominal
+   `slice_us`.
+3. Every delivery (RX, TX_STATUS, Wi-Fi forward) is held in a queue until its computed virtual
+   time and released at the first slice boundary at or after it. Before, a frame was delivered
+   at the end of the slice it was sent in, even when its airtime outlasted the slice.
+4. Frames that reach the host between slices (slirp is asynchronous) join the next batch; before,
+   the per-slice reset dropped them.
+
+**Consequence.** Reactive latency is quantized to the effective slice: M2 RTT (ping, broadcast,
+unicast reply, 20 % loss) p50 5.6 ms, min 3.3 ms, n = 28; real hardware would be ~2–3 ms.
+Delivery, loss, retries and ordering are unaffected. Firmware runs are not bit-reproducible
+even with a fixed seed, because guest timing changes the order frames reach the medium; mock
+runs still are.
+
+**Sources.** This session's M2 runs; `simulation.py` `_run_qemu`, `_start_time`, `_flush_due`.
+
+---
+
+## V-011 — UART on a Windows-mounted path stalls the guest
+
+With the ping's `t0` taken before its log line, `t0` to the shim's send stamp was 4–34 ms: the
+`ESP_LOGI` call. QEMU wrote the UART to a file under `/mnt/c` (a 9P mount), and the guest blocks
+on every UART write. UART logs now go to the run's temp dir on the Linux filesystem and are
+copied to `out/` at the end. The ping app also takes `t0` after logging. Median RTT went from
+13.7 ms to 4.6 ms.
+
+---
+
+## D-030 — Real-time mode tried and rejected
+
+Alternative to lockstep: start the VMs once and let them free-run, with the medium applying
+airtime delays against the wall clock. Measured on M2: RTT p50 8.7 ms against 4.6 ms for lockstep
+in the same build, and it gives up determinism of ordering. The host loop could not tick faster
+than ~1.2 ms under WSL, and the guest's own processing is the same in both modes. Removed; not
+kept as an option.
+
+---
+
+## D-031 — Carrier sense, and retries that meet their own traffic
+
+**Context.** M3 with five real nodes: pongs 2, 3 and 4 all reply in the same slice, get the same
+start stamp (D-029), and collided at node 1; node 2 captured and 3 and 4 got 16/36 and 13/36
+replies through. On hardware those three hear each other and defer.
+
+**Decision.** (1) Carrier sense: before evaluation, each frame is delayed past any earlier
+same-channel frame whose sender it can hear at or above −82 dBm (802.11 preamble detection).
+Hidden terminals still collide. (2) Each unicast retry is checked against the traffic overlapping
+that attempt's own window. Before, all retries reused the first attempt's interferers, so one
+collision doomed all four attempts.
+
+**Result.** M3 replies to node 1: node 3 16/36 → 34/34, node 4 13/36 → 35/35 (20 of node 4's needed
+a retry: at −88 dBm it is a hidden terminal to node 2). Tests: hidden terminals collide; senders in
+range take turns; a unicast escapes a hidden-terminal collision on its retry.
+
+---
+
+## D-032 / V-012 — M4: Wi-Fi stations reach the real Internet across the modeled link
+
+**Context.** PDF component 5: stations associate with a virtual AP; traffic that crosses the
+simulated link goes through the host to the real Internet (DNS, TCP, HTTP).
+
+**Design.**
+- Guest: the shim emulates a Wi-Fi station on the open_eth NIC.
+  `esp_netif_create_default_wifi_sta` returns the Ethernet netif; `esp_wifi_start` posts
+  `WIFI_EVENT_STA_START`; `esp_wifi_connect` starts Ethernet; DHCP success is re-posted as
+  `WIFI_EVENT_STA_CONNECTED` and `IP_EVENT_STA_GOT_IP`. Firmware C (`wifi_http`) is a standard
+  IDF station app that fetches `http://example.com` every 2 s, unmodified.
+- Host: QEMU's `filter-redirector` detours every Ethernet frame between the NIC and slirp through
+  four UNIX-socket chardevs to the medium (`wifi_link.py`). Each frame becomes an 11 Mbps unicast
+  on the station-AP link (the AP is medium node 0 and ignores ESP-NOW); if the medium delivers it,
+  it goes on to slirp (uplink) or the guest (downlink) at its computed time. It contends with
+  ESP-NOW on the same channel and gets carrier sense, retries and loss like any frame. The shim's
+  own TCP link to the medium (10.0.2.2:port) is exempt: it is not radio traffic.
+- Trace: Wi-Fi frames are written as 802.11 data frames (ToDS/FromDS, LLC/SNAP), so Wireshark
+  decodes the real IP, TCP and HTTP inside.
+
+**Result (`configs/m4_wifi_gateway.yaml`, AP on channel 6):**
+
+| station | distance | RSSI | outcome |
+|---------|----------|------|---------|
+| 1 | 25 m | −62 dBm | DHCP, then HTTP 200 every 2 s (21–88 ms) |
+| 2 | 160 m | −86 dBm | DHCP, then HTTP 200 every 2 s; retries in some runs (up to 4 attempts) |
+| 3 | 230 m | −91 dBm | every DHCP frame lost after 4 attempts; logs "no IP yet" |
+
+**Two bugs found on the way.** (1) QEMU closed the filter sockets at once: `bridge()` kept only
+one half of each asyncio connection, and a collected `StreamWriter` closes its socket. (2) A new
+app built for the default ESP32 target (bootloader at 0x1000) boot-looped; apps now pin
+`CONFIG_IDF_TARGET="esp32s3"` and scenario loading rejects builds for any other chip.
+
+**Honest scope.** There are no 802.11 authentication or association frames: "associated" means
+the link is usable. Each station has its own slirp NAT, so stations cannot reach each other at
+layer 2 through the AP. Wi-Fi rate is fixed at 11 Mbps.
+
+**Sources.** PDF component 5 and M4; QEMU `filter-redirector` docs; D-012, D-031.
+
+---
+
+## D-033 — M5 and M6: the scenario file launches everything; each run leaves a replay
+
+**M5.** A node with `firmware: <build dir>` boots under QEMU; one without is a mock. `esp-netsim run`
+builds each firmware node's flash image, starts every QEMU paused, connects QMP (and the Wi-Fi
+sockets), runs the barrier, then writes `out/<name>/`: `trace.pcapng`, `results.json` (topology,
+totals, one row per frame and receiver), each node's UART log, and `report.html`.
+`orchestrator/gate.py` and `firmware/qemu/m2_run.py` are gone: the barrier calls `cont`/`stop`
+on the QMP clients directly, and the runner replaces the one-off M2 script.
+
+**M6.** `report.html` is a self-contained page (no network, no build step) with exactly what the
+PDF lists: nodes at their positions, links coloured by delivery ratio, each frame animated
+green or red as a timeline plays or is scrubbed, and each node's console revealed in step. The
+console is placed by the firmware's own log timestamps, which lag virtual time (D-029).
+
+---
+
+## V-013 — The brief's 20-node workflow, and scale
+
+`configs/example_20_nodes.yaml`: a 4 × 5 grid at 100 m; firmware A on nodes 1–10, B on 11–18,
+C on 19–20 with the AP. 20 QEMU VMs, 5 s of virtual time in 25 s of wall time on this laptop
+(WSL2, 20 threads). The effective quantum is 3.7 ms. 694 transmissions; both Wi-Fi stations
+fetched example.com; node 1 heard no pong because none is within range of its corner, while
+node 10 in the middle logged 97 RTTs in the development run.
+
+---
+
+## Status snapshot (end of this session)
+
+- M1–M6 run with real firmware (M1 in every scenario, M5 and M6 for every run). Scenarios:
+  `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`; mock-only
+  `two_node`, `multi_node_espnow`.
+- 61 tests (medium, barrier, wire codec, config, trace, Wi-Fi bridge, runner end to end).
+- Limits: timing quantized to 1.5–4 ms of virtual time (V-010); no 802.11 association frames
+  (D-032); no hardware validation (Appendix E).
 
 ---
 
 
 ---
 
-# PART II — Consolidated Reference (folded-in docs)
-
-> These sections were previously standalone files under `docs/`; folded here so the
-> research log is the single source of truth. Raw evidence logs remain as data files
-> (`docs/m1_qemu_boot.log`, `docs/spike2_evidence.log`). Cross-references to `../RESEARCH_LOG.md`
-> inside these sections now point to this same document.
-
+# PART II — Consolidated Reference
 
 ## Appendix A — Architecture
 
-# Architecture
-
-This expands the README diagram. Rationale for each choice is in `RESEARCH_LOG.md`
-(cited as `D-NNN`).
-
-## Components
-
-### 1. Virtual nodes (`nodes/`, `firmware/`)
-- **MockNode** (`nodes/mock_node.py`): pure-Python node for tests/demos (D-015).
-- **QEMU + espnet_shim** (`firmware/`, `orchestrator/qemu_launcher.py`): real ESP-IDF
-  firmware in QEMU; the shim overrides `esp_now_*` and pipes frames to the medium
-  (D-002, D-017). Source-only in this repo (D-000).
-
-Both speak one protocol (`docs/PROTOCOL.md`), so the medium is agnostic to node kind.
-
-### 2. Transport (`transport/server.py`)
-Asyncio TCP server; the medium is the long-lived listener, nodes are clients. Length-
-prefixed JSON framing (D-003). Swappable for UNIX sockets / UART / `open_eth` later.
-
-### 3. Simulation / barrier clock (`orchestrator/simulation.py`)
-SliceTime-style barrier (D-004, D-014). Per slice: snapshot participants → `RUN_SLICE`
-→ collect `TX` → wait all `SLICE_DONE` → `MediumEngine.process_batch` → dispatch
-`TX_STATUS`/`RX`. Guarantees virtual-time skew between nodes ≤ one slice.
-
-### 4. Medium engine (`medium.py`)
-Owns node positions/peers/channels. Reproduces ESP-NOW semantics (D-012): send-callback
-verdict (broadcast-unacked-success / unicast-ACK-or-fail with retries; fail causes
-peer-not-exist / channel-mismatch / lost-on-air), RX dispatch, encryption policy. Uses:
-
-### 5. Channel physics (`channel/`)
-- `pathloss.py` — log-distance + shadowing, ns-3 defaults (D-006).
-- `error_model.py` — `constant` | `range` (UDGM) | `snr_per` (YANS-style) (D-007).
-- `airtime.py` — 802.11 DCF airtime (DIFS/SIFS/backoff/PLCP) (D-008).
-- Collision: SINR vs summed interference, capture threshold (D-009, D-013).
-All pure, unit-tested; one seeded RNG for determinism (D-011).
-
-### 6. Config (`config/`) & tracing (`trace/`)
-YAML scenarios with fail-fast validation; pcapng + radiotap traces stamped with
-simulation-clock time and per-packet medium annotations (D-016).
-
-### 7. CLI (`cli.py`)
-`run` / `validate` / `info`. Entry point `esp-netsim`.
-
-## Data flow of one ESP-NOW send
-
-1. App calls `esp_now_send(peer, data)` → shim/MockNode emits `TX` at virtual time `t`.
-2. Server buffers it into the current slice; node acks `SLICE_DONE`.
-3. At the barrier, `MediumEngine.process_batch` computes airtime, interference/SINR,
-   PER, and the send verdict; produces `TxOutcome` (status + per-receiver verdicts).
-4. Simulation sends `TX_STATUS` to the sender (→ app send-cb) and `RX` to each
-   receiver that passed (→ app recv-cb). TraceRecorder writes every attempt to pcapng.
-
-## Determinism contract
-
-A run is a pure function of `(scenario, seed)` given fixed node I/O order; the barrier
-fixes the order, and all randomness flows through one seeded RNG (D-011). Same inputs →
-byte-identical traces. This is the "repeatability of a simulator" the project targets.
-
-## Extension points (designed-for, not yet built)
-
-- New propagation/error models: implement the `PropagationLoss` / `ErrorRateModel`
-  protocol (e.g. Nakagami fading, ANRG `gfge` Gilbert-Elliott — D-007).
-- New transports: implement the server/− client framing over UNIX/UART/`open_eth`.
-- Multi-channel adjacent-interference, per-symbol chunked SINR (D-007/D-013 futures).
-- Hierarchical/sharded barrier for hundreds of nodes (D-004/D-011 futures).
-- M6 GUI: consume the outcome-hook stream + pcapng; reuse ANRG ncsim web viz (brief §10).
-
-
-## Appendix B — Node⇄Medium Wire Protocol
-
-# Node ⇄ Medium Wire Protocol (v1)
-
-This is the single contract between a virtual node (QEMU + `espnet_shim`, **or** the
-pure-Python `mock_node`) and the host-side wireless-link medium. See decisions **D-002**
-(why a protocol), **D-003** (transport), **D-005** (time unit) in `RESEARCH_LOG.md`.
-
-## Transport & framing
-
-- Transport: **TCP** to the medium server on `127.0.0.1:<port>` (default `52333`). One
-  connection per node.
-- Framing: every message is `uint32 big-endian length` + that many bytes of **binary body**
-  (D-019 — JSON was a smell on the emulated-Xtensa hot path; the C shim now writes raw bytes).
-  - Length-prefix (not newline-delimited) because 802.11/ESP-NOW payloads are arbitrary bytes.
-  - The body is compact big-endian: `uint8 tag` then fixed fields; MACs are 6 raw bytes; a
-    payload is `uint16 length + bytes`; floats are IEEE-754 `float32`. See the exact field
-    layout in `src/esp_netsim/protocol.py` (`encode_body`/`decode_body`) — the authoritative
-    reference the C shim mirrors (`firmware/components/espnet_shim/espnet_shim.c`), locked by
-    `tests/test_protocol.py::test_binary_wire_layout_is_locked`.
-  - A JSON form (`Message.to_json_bytes`) is retained for debugging only; it is not on the wire.
-
-## Message envelope
-
-Logical shape (as `Message.type` + payload; the wire form is the binary body above):
-
 ```
-tag=<MSG_TYPE>  node=<u16>  t=<u64 micros>  ...type-specific fields...
+ QEMU esp32s3 (firmware + espnet_shim) ─┐  TCP over open_eth + slirp: HELLO, TX, ADD_PEER
+ QEMU esp32s3 ...                       ├──────────────────────────────►  MediumServer
+ MockNode (Python stand-in)             ┘  ◄──── RX, TX_STATUS, RUN_SLICE       │
+        ▲                                                                      ▼
+        │ QMP cont/stop (UNIX socket)                              Simulation (barrier clock)
+        └──────────────────────────────────────────────────────────  per slice: run nodes,
+                                                                     batch frames, schedule
+ Wi-Fi station NIC ──filter-redirector──► wifi_link ──► offer()      deliveries by due time
+         ▲                                                  │                  │
+         └──── slirp NAT ◄── delivered frames ◄─────────────┘                  ▼
+                   │                                            MediumEngine: carrier sense,
+                   ▼                                            SINR collisions, retries,
+             real Internet                                      path loss, SNR->PER, airtime
+                                                                         │
+                                         trace.pcapng, results.json, report.html
 ```
 
-- `type`/`tag` — message kind (table below; tag values in `protocol._TAG`).
-- `node` — the sender/owner node id (the medium also knows it from the connection).
-- `t` — virtual time in **integer microseconds** (D-005). For a QEMU node this is
-  `esp_timer_get_time()` which, under the QMP barrier, equals virtual time because the guest
-  clock freezes while paused (D-022). The medium sets delivery times ≥ the frame's `t` (D-014).
+- `orchestrator/runner.py` turns a scenario into processes: one QEMU per firmware node
+  (`qemu_launcher.py`: flash image with NVS identity, `-S`, UART to file, QMP), a Wi-Fi bridge per
+  station (`wifi_link.py`), a MockNode per remaining node.
+- `orchestrator/simulation.py` is the clock master. Per slice: RUN_SLICE to mocks and `cont` to
+  QEMU nodes; wait for mock acks and the slice's wall time; `stop`; advance virtual time by the
+  measured guest time; hand the slice's frames to the engine; queue each outcome's deliveries at
+  their computed times; release everything now due.
+- `medium.py` holds positions, channels and peers and decides each frame: carrier-sense deferral,
+  per-receiver SINR against overlapping frames with capture, per-attempt retries for unicast,
+  ESP-NOW send-callback semantics (D-012).
+- `channel/`: log-distance path loss (D-006), SNR→PER (D-007), 802.11 DCF airtime (D-008).
 
-## Message types
+**Determinism.** One seeded RNG. A mock-only run is a pure function of scenario and seed. A run
+with QEMU nodes is not bit-reproducible: guest timing changes the order frames reach the medium.
 
-### Node → Medium
+## Appendix B — Node ⇄ Medium Wire Protocol
 
-| type        | fields                                                                                  | meaning |
-|-------------|-----------------------------------------------------------------------------------------|---------|
-| `HELLO`     | `node`, `caps` (obj: `{"espnow":true,"wifi":false}`), `mac` (str `"aa:bb:.."`)          | register on connect |
-| `ADD_PEER`  | `node`, `peer` (mac str), `channel` (int), `encrypt` (bool), `lmk` (hex or null)        | mirrors `esp_now_add_peer` (brief §3) |
-| `DEL_PEER`  | `node`, `peer`                                                                            | mirrors `esp_now_del_peer` |
-| `TX`        | `node`, `t`, `src` (mac), `dst` (mac), `channel`, `rate_mbps`, `seq` (int), `data` (hex) | an ESP-NOW frame offered to the air |
-| `SLICE_DONE`| `node`, `t`                                                                              | node has run to the slice boundary and is paused (barrier ack, D-004) |
+TCP to `127.0.0.1:<port>` (the guest reaches it as `10.0.2.2:<port>` through slirp). Every message
+is a `uint32` big-endian length and a binary body: `uint8` tag, then fixed big-endian fields;
+MACs are 6 raw bytes, payloads `uint16` length + bytes, floats IEEE-754 `float32`. The
+authoritative layout is `protocol.py` (`encode_body`/`decode_body`), mirrored by the packed
+structs in `espnet_shim.c` and locked by `tests/test_protocol.py`.
 
-### Medium → Node
+| Node → Medium | fields | meaning |
+|---|---|---|
+| `HELLO` | node, mac, caps | register |
+| `ADD_PEER` | node, peer, channel, encrypt, lmk | `esp_now_add_peer` |
+| `DEL_PEER` | node, peer | `esp_now_del_peer` (accepted, not modeled) |
+| `TX` | node, t, src, dst, channel, rate, seq, data | an ESP-NOW frame offered to the air |
+| `SLICE_DONE` | node, t | mock node reached the barrier |
 
-| type        | fields                                                                                   | meaning |
-|-------------|------------------------------------------------------------------------------------------|---------|
-| `WELCOME`   | `node`, `slice_us` (int), `mac`                                                            | ack HELLO; announce slice size |
-| `TX_STATUS` | `node`, `seq`, `status` (`"success"`\|`"fail"`), `t`                                       | the ESP-NOW **send callback** verdict (brief §3 — the single most important behavior) |
-| `RX`        | `node`, `t`, `src` (mac), `dst` (mac), `channel`, `rate_mbps`, `rssi_dbm` (float), `data` (hex) | deliver a frame to this node's RX callback |
-| `RUN_SLICE` | `until_t` (int)                                                                            | release the node to run until virtual time `until_t`, then pause and send `SLICE_DONE` |
-| `SHUTDOWN`  | —                                                                                         | orderly stop |
+| Medium → Node | fields | meaning |
+|---|---|---|
+| `WELCOME` | node, slice_us, mac | ack HELLO |
+| `TX_STATUS` | node, seq, status, t | the send-callback verdict, at its computed time |
+| `RX` | node, t, src, dst, channel, rate, rssi, data | deliver to the receive callback |
+| `RUN_SLICE` | until_t | mock node: run to `until_t` |
+| `SHUTDOWN` | — | orderly stop |
 
-## Semantics the medium guarantees
-
-1. **Send-callback fidelity (brief §3).** For every `TX`, exactly one `TX_STATUS` is returned.
-   - Unicast: `success` iff the frame was delivered *and* MAC-ACKed within the retry budget;
-     `fail` otherwise (peer absent, wrong channel, or lost on air).
-   - Broadcast (`ff:ff:ff:ff:ff:ff`): `success` as soon as it is transmitted (unacknowledged),
-     regardless of who receives it.
-2. **RX dispatch.** A node receives an `RX` for a frame iff it is in range with sufficient SINR
-   on the same channel (and, for encrypted unicast, has the peer/LMK). Broadcast needs no peer.
-3. **Virtual-time causality.** `RX`/`TX_STATUS` carry the *delivery* virtual time
-   (`emit_t + airtime + propagation`), never earlier than the frame's `t`. During barrier mode
-   all such events for a slice are computed while nodes are paused, then dispatched (D-004).
-
-## Why binary (D-019)
-
-The original v1 used JSON+hex for debuggability. That was changed to binary **before** the
-barrier-timing spike: hand-encoding JSON in C on an emulated Xtensa core, in the exact path we
-are about to time, adds cost and a variable to the measurement (reviewer). The binary body is
-trivial to write in C (fixed-layout big-endian, no allocator, no string formatting), removes the
-hex-doubling of payloads, and keeps the same `Message` semantics — the medium/orchestrator code
-is unchanged. Proven end-to-end: the C shim's binary HELLO/TX are decoded by the host codec with
-`t` carrying `esp_timer` micros (`docs/spike2_evidence.log`). A JSON debug form remains available
-off-wire.
-
+Guarantees: one TX_STATUS per TX (unicast success iff ACKed within the retry budget; broadcast
+success once on the air); RX only for receivers in range, on channel, above the capture threshold;
+nothing is released before its computed virtual time. For QEMU nodes the medium ignores `t` and
+uses the slice of arrival (D-029).
 
 ## Appendix C — Milestone Status
 
-# Milestone status (honest — see RESEARCH_LOG.md D-019)
+| M | Goal (PDF) | Status | Evidence |
+|---|---|---|---|
+| M1 | Boot an ESP-IDF image under QEMU, capture UART | done | every firmware run; `docs/m1_qemu_boot.log` (D-020) |
+| M2 | Two emulated nodes, controlled delivery and loss | done | `m2_two_qemu`: 20 % constant loss; 5 of 34 pings lost, replies retried and delivered (D-029) |
+| M3 | Several nodes, configurable ESP-NOW connectivity, traces | done | `m3_espnow_line`: delivery falls off with distance, carrier sense and hidden terminals (D-031) |
+| M4 | Wi-Fi to the real Internet and back | done | `m4_wifi_gateway`: HTTP 200 near, retries at the edge, no DHCP out of range (D-032) |
+| M5 | Config file launches all nodes, collects results | done | `esp-netsim run` (D-033) |
+| M6 | GUI: nodes, links, packets, console | done as a replay page | `out/<name>/report.html` (D-033) |
 
-Milestones from the project brief (PDF) and research brief §9. **No milestone is "complete":
-no ESP-IDF firmware has executed yet.** What exists is the host-side medium/orchestration,
-unit-tested against `MockNode` (a Python stand-in), plus *unverified* QEMU-path source.
-The critical correction (D-019): the earlier "Done (mock)" labels over-claimed — the milestones
-are only meaningful with real firmware underneath, which is the work now in progress.
+**Next, in order.**
+1. Hardware validation (Appendix E): same A/B firmware on boards and in the emulator, RTT and
+   PDR vs distance.
+2. Tighter timing: `-icount` on the Xtensa fork, or a run-to-next-event barrier, to get the
+   quantum below QMP overhead (V-010).
+3. 802.11 association frames and station-to-station traffic through one shared AP.
+4. A live (not replay) view, and topology editing in the GUI (PDF: "configuring topology").
 
-| M | Goal | Honest status | Notes |
-|---|------|---------------|-------|
-| **M1** | Single ESP32-S3 boots under QEMU, UART captured | **DONE (real firmware)** | ESP-IDF v5.4.2 hello_world booted on emulated esp32s3, QEMU 9.0.0/WSL2; UART in `docs/m1_qemu_boot.log`; repro `firmware/qemu/*.sh` (D-020/V-002) |
-| **M2** | Two-node link, controlled delivery/loss | **DONE (real firmware)** | real QEMU node (QMP-gated) + MockNode on one barrier; 140 ESP-NOW frames delivered through the medium, RSSI from path-loss model (V-009, `firmware/qemu/m2_run.py`) |
-| **M3** | Multi-node ESP-NOW + traces | **Medium layer only** | path-loss/PER/collision + pcapng tested vs `MockNode`; NOT with firmware |
-| **M4** | Wi-Fi Internet gateway via host NAT | **Designed, unverified** | `open_eth`+NAT plan in `QEMU_INTEGRATION.md` |
-| **M5** | Experiment framework: config → launch → collect | **Mock launcher only** | launches `MockNode`s; QEMU launch path unverified |
-| **M6** | GUI | **Not started** | outcome-hook + pcapng streams available to build on |
-
-## Risk-first order (brief §9) — live status
-
-1. **Shim linkage (risk #3): ✅ RESOLVED (D-021/V-003).** Empirically: naive component symbol
-   provision does NOT interpose (link order favors IDF; the app called the real `esp_now_init`
-   and crashed). `--wrap` IS required and WORKS — confirmed in QEMU: the app calls our
-   `__wrap_esp_now_*` with zero app-source edits. Enabled by default in the component.
-2. **Transport (risk #2): ✅ RESOLVED (V-004).** Real firmware brings up `open_eth`+DHCP
-   (`GOT_IP 10.0.2.15`), the `--wrap`'d `esp_now_send` pipes a frame out of QEMU via slirp NAT,
-   and the **real `esp_netsim` codec decoded the HELLO + ESP-NOW TX** on the host
-   (`docs/spike2_evidence.log`). Proven node app: `firmware/examples/espnet_node/`.
-   *Remaining:* swap JSON body → length-prefixed binary *before* timing per-frame overhead.
-3. **Barrier timing (risk #1): 🟡 TWO OF THREE AXES VALIDATED.**
-   - **Clock freeze — CONFIRMED (V-006):** guest `esp_timer` freezes on QMP `stop` (guest
-     advanced 0.22 s across a 3.27 s wall pause), so `esp_timer` == virtual time (D-022 holds).
-   - **Throughput — PASS (V-007/D-024):** QMP `stop`/`cont` over a UNIX socket costs ~0.75–1.4 ms/
-     cycle → 421 slices/s at a 1 ms slice, 919/s at 250 µs — ≥100/s bar cleared 4×. (An early
-     88 ms/11-per-s reading was a TCP delayed-ACK artifact, ruled out.)
-   - **Latency fidelity — MEASURED (V-008):** real node under the barrier, 300 frames.
-     1 ms slice → 52.5% error (FAIL); **250 µs slice → 14.3% error (PASS)**. A 250 µs slice
-     passes both fidelity and throughput (919/s). Trace timestamps are exact at any slice;
-     deterministic offline mode gives zero quantization if needed.
-   **Risk #1 RETIRED** — clock-freeze holds, throughput passes, fidelity passes at 250 µs, offline
-   mode as exact-fidelity fallback. No redesign forced.
-
-**Then:** rerun `two_node.yaml` with one QEMU node + one MockNode = the first *honest* M2.
-
-## What the software layer proves and does not
-
-**Proves:** the medium math (path loss, PER, airtime, collision) and ESP-NOW send/recv
-*semantics* are implemented and internally consistent, deterministic, and unit-tested.
-
-**Does NOT prove:** that real ESP-IDF firmware links against the shim, that frames actually
-leave QEMU, that the barrier holds real timing, or that any of it matches hardware. Those are
-the unverified assumptions the risk spikes exist to test.
-
-## Recommended next steps (in order)
-
-1. Bring up M1 on Linux + Espressif QEMU fork; boot `firmware/examples/espnow_ping`.
-2. Spike the three risks (barrier timing, transport, shim linkage) — `QEMU_INTEGRATION.md`.
-3. Wire `QemuNodeHandle` as a barrier gate in `Simulation` (small refactor: gate
-   interface with `MockNode` = message-ack, `QEMU` = QMP stop/cont).
-4. Hardware validation: ESP-NOW latency + PDR, virtual vs. real ESP32-S3 (brief §9 rec 3,
-   `docs/VALIDATION.md`) — the centerpiece plot for a demo/tool paper (EWSN/IPSN/WNS3).
-5. M6 GUI and ANRG PyWiSim/ncsim interoperation.
-
-
-## Appendix D — QEMU + ESP-IDF Integration Runbook
-
-# QEMU + ESP-IDF Integration Runbook (M1, M4)
-
-> **Status:** the code in `firmware/` and `orchestrator/qemu_launcher.py` is delivered
-> as source. It is **not** exercised in the Python repo's CI because this project was
-> developed on Windows without `qemu-system-xtensa` or ESP-IDF (research-log D-000).
-> This runbook is the step-by-step to bring it up on a Linux host, and the three
-> highest-risk spikes to do first (brief §9).
-
-## Why the medium code doesn't change
-
-A QEMU node and a `MockNode` are interchangeable clients of the same wire protocol
-(`docs/PROTOCOL.md`, decisions D-002/D-015). The medium, barrier clock, tracing, and
-config are identical. Only two things are QEMU-specific:
-
-1. **Transport:** the guest's `espnet_shim` connects a TCP socket (over the emulated
-   `open_eth` NIC + user-mode NAT) to the host medium at `10.0.2.2:52333`.
-2. **Barrier gate:** instead of acking `RUN_SLICE` messages, a QEMU node is paused
-   and resumed by the clock master via QMP `stop`/`cont` (`qemu_launcher.QmpClient`).
-
-## Prerequisites (Linux)
+## Appendix D — Runbook (Linux or WSL2)
 
 ```bash
-# 1. Espressif QEMU fork (has the esp32s3 machine; upstream QEMU does not).
-#    See github.com/espressif/qemu releases, or:
-#    idf.py install-qemu  (recent ESP-IDF)  OR  build the fork from source.
-qemu-system-xtensa --version           # must be the espressif fork
-
-# 2. ESP-IDF (pin a version! ESP-NOW payload limits are version-sensitive — brief §10c,f).
-#    v5.4.2+ if you want ESP-NOW v2.0 (1470-byte) payloads.
-. $IDF_PATH/export.sh
+firmware/qemu/setup_esp_idf.sh                   # ESP-IDF v5.4.2, QEMU 9.0.0, libslirp without sudo
+. ~/esp/esp-idf/export.sh
+for app in espnow_ping espnow_pong wifi_http; do idf.py -C firmware/examples/$app build; done
+python3 -m venv ~/netsim-venv && ~/netsim-venv/bin/pip install -e ".[qemu,dev]"
+export LD_LIBRARY_PATH=$HOME/.local/lib          # if setup fetched libslirp
+~/netsim-venv/bin/esp-netsim run configs/m4_wifi_gateway.yaml
 ```
 
-## Build the example firmware
-
-```bash
-cd firmware/examples/espnow_ping
-idf.py set-target esp32s3
-idf.py -DCONFIG_ESPNET_EMULATION=1 -DCONFIG_ESPNET_NODE_ID=1 build
-# Produce a single flash image QEMU can boot:
-esptool.py --chip esp32s3 merge_bin -o build/flash.bin @build/flash_args
-```
-
-## Run a single node under QEMU (M1)
-
-```bash
-# Start the host medium first (it is the long-lived TCP listener, D-003):
-esp-netsim run configs/two_node.yaml     # or a dedicated qemu scenario
-
-# Then boot the node (qemu_launcher builds this argv for you):
-qemu-system-xtensa -nographic -machine esp32s3 \
-  -drive file=build/flash.bin,if=mtd,format=raw \
-  -nic user,model=open_eth,guestfwd=tcp:10.0.2.2:52333-tcp:127.0.0.1:52333 \
-  -qmp unix:/tmp/espnet-qmp-1.sock,server=on,wait=off -S
-```
-
-The Python side drives launch + gating via:
-
-```python
-from esp_netsim.orchestrator.qemu_launcher import QemuNodeSpec, QemuNodeHandle
-h = QemuNodeHandle(QemuNodeSpec(node_id=1, flash_image="build/flash.bin",
-                                medium_port=52333))
-await h.start()          # boots paused (-S)
-await h.run_slice(0.001) # cont, wait one slice, stop  (QMP barrier, D-004)
-```
-
-## Spike these THREE unknowns first (brief §9)
-
-1. **Barrier timing fidelity (highest risk).** Two QEMU nodes, ESP-NOW ping; measure
-   one-way latency under the QMP `stop`/`cont` barrier and compare to the ~1–2 ms real
-   MAC latency (brief §3). If the barrier can't hold it without collapsing throughput,
-   switch to the deterministic offline mode (run-to-barrier, no real-time pacing) or
-   investigate `-icount` on the fork (brief thresholds, D-004/D-014).
-2. **Transport out of QEMU.** Compare `open_eth`-socket vs a dedicated UART/USB-serial-
-   JTAG channel for per-frame overhead (brief §9 risk #2). The `espnet_transport.h`
-   abstraction lets you swap backends without touching the shim logic.
-3. **Shim linkage.** Confirm the app links `espnet_shim`'s `esp_now_*` rather than
-   IDF's. Try both: component symbol provision (default) and the `--wrap` variant in
-   `firmware/components/espnet_shim/CMakeLists.txt` (brief §9 risk #3).
-
-## Wi-Fi/Internet gateway (M4)
-
-For infrastructure Wi-Fi to the real Internet, keep `open_eth` + user-mode NAT and let
-lwIP do real DNS/TCP/UDP/HTTP through the host (brief §1, §9 M4):
-`-nic user,model=open_eth,hostfwd=tcp:127.0.0.1:8080-:80`. A virtual-AP abstraction
-node terminates association and forwards; ESP-NOW frames still go through the medium.
-
-## Known caveats (from the brief; verify during the spike)
-
-- The exact `hw/xtensa/esp32s3.c` path and `open_eth` base/IRQ were *inferred* in the
-  brief; confirm by grepping the espressif/qemu tree (brief caveats).
-- `-netdev socket` TCP mode has reconnect fragility; we make the medium the stable
-  listener and the node the reconnecting client to avoid it (D-003, brief caveats).
-- ESP-NOW real-hardware latency figures are third-party/field-study numbers, not an
-  Espressif spec; treat the MicroPython S3 11–31 ms figure as Python-stack overhead,
-  not raw MAC (brief §3 caveats).
-
+Gotchas this encodes: the S3 ROM loads the bootloader at 0x0 (the runner uses the build's own
+`flasher_args.json`); a build left on the default ESP32 target boot-loops (rejected at scenario
+load); QMP must use a UNIX socket (V-007); UART must be written to a Linux path (V-011);
+`pkill -f qemu-system-xtensa` also kills the shell that ran it (V-007), so kill by exact name.
 
 ## Appendix E — Validation Plan
 
-# Validation plan
+Done, no hardware: V-001 (emergent ~200 m range matches published ESP-NOW LOS range);
+unit reference points (Friis reference loss, DCF constants, airtime); M2–M4 behave as the model
+predicts (loss rate, distance falloff, retries, hidden terminals).
 
-The centerpiece of a tool/demo paper is showing the emulator reproduces real-hardware
-behavior on a nontrivial scenario (brief §8, §9 rec 3). This documents what is validated
-now and the hardware-validation protocol to run next.
+Next, with boards. Run firmware A and B unmodified (`-DESPNET_HARDWARE=1`) on N boards and in
+the emulator:
+1. RTT distribution (median, P95) vs payload size. Expect the emulator to read high by roughly
+   one to two effective quanta (V-010); that gap is the number to report.
+2. PDR vs distance. Tune `path_loss_exponent`, `tx_power_dbm`, `noise_figure_db` to the measured
+   curve and report the residual.
 
-## Done now: model self-consistency (no hardware)
-
-- **V-001 (range).** Distance sweep of the `snr_per` model yields ~200 m effective LOS
-  range, matching published ESP-NOW LOS range 190–250 m (brief §3). See `RESEARCH_LOG.md`
-  V-001. This is a *self-consistency* check, not hardware validation.
-- **Unit-level reference points.** Friis reference loss = 40.046 dB (vs ns-3 40.0459);
-  DCF constants slot/SIFS/DIFS = 20/10/50 µs; airtime order-of-magnitude ~1 ms for small
-  ESP-NOW frames (vs measured 1059 µs @1 B). See `tests/test_channel_models.py`.
-
-## Next: hardware validation (needs ESP32-S3 boards + Linux QEMU)
-
-Reproduce two headline metrics from the literature and match them virtual-vs-real:
-
-1. **One-way ESP-NOW latency vs payload.** Real target: ~1059 µs @1 B, ~1869 µs @100 B
-   on ESP32-CAM (WONS 2025, brief §3). Run the same firmware on N real boards and N QEMU
-   nodes; compare latency distributions (median + P95/P99 tail).
-2. **Packet-delivery ratio vs distance.** Real target: PDR degrades with distance with
-   heavy-tailed delay (brief §3); optionally fit against ANRG's 100-node PRR datasets
-   (anrg.usc.edu/downloads, brief §10). Tune `path_loss_exponent`, `shadowing_sigma_db`,
-   `noise_figure_db`, `tx_power_dbm` to the measured curve.
-
-### Protocol
-
-- Same ESP-IDF app both places (`firmware/examples/espnow_ping`, unmodified).
-- Timestamp with the app's monotonic clock on hardware; use simulation-clock time in the
-  emulator (traces already carry it, D-016).
-- Report the tuned medium parameters and the residual error; enable shadowing to capture
-  the heavy tail.
-
-### Success criterion
-
-Latency medians within a small factor and PDR-vs-distance curves overlapping within the
-measurement's own variance on at least one nontrivial multi-node scenario. That plot is
-the demo/tool-paper centerpiece (target EWSN/IPSN demo or WNS3, brief §8).
-
-## Threshold that changes the plan (brief §9 risk #1)
-
-If the QMP barrier can't hold two-node latency within a few hundred µs of the ~1 ms real
-MAC without collapsing throughput, switch to deterministic offline mode (run-to-barrier,
-no real-time pacing) or investigate `-icount` on the Xtensa fork (D-004/D-014).
-
-
-## Appendix F — Risk-Retirement Status Update
-
-# ESP32-S3 Network Emulator — Risk-Retirement Update
-
-**One line:** the three highest-risk unknowns of the QEMU-based ESP-NOW emulator are now retired
-with on-target measurements, the emulator boots real firmware, and a real ESP-NOW frame has
-travelled from emulated firmware into the host medium — no redesign forced.
-
-This update covers the feasibility phase (the research brief's §9 "spike these first" list). All
-claims below are backed by artifacts in this repo; every decision is in `RESEARCH_LOG.md`.
-
----
-
-## What is now proven (with evidence)
-
-| # | Result | Evidence |
-|---|--------|----------|
-| **M1** | Real ESP-IDF v5.4.2 `hello_world` boots on emulated ESP32-S3 (Espressif QEMU 9.0.0) | `docs/m1_qemu_boot.log`; repro `firmware/qemu/setup_esp_idf.sh` + `run_qemu.sh` (D-020) |
-| **Risk #3 — shim linkage** | Component symbol provision does **not** interpose (link order favors IDF; the app called the real `esp_now_init` and crashed). **`--wrap` is required and works** — app calls our shim with zero source edits | `RESEARCH_LOG.md` D-021 |
-| **Risk #2 — transport** | A real ESP-NOW broadcast leaves QEMU (shim → open_eth → slirp NAT) and is decoded by the host medium's real codec: `RECV HELLO`, `RECV TX` | `docs/spike2_evidence.log`; `firmware/examples/espnet_node/` |
-| **Wire format** | Swapped JSON → length-prefixed **binary** (C shim + Python), proven on-target; `t` carries `esp_timer` micros | D-019/V-005; layout locked by a test |
-| **Risk #1 — barrier, clock freeze** | Guest `esp_timer` **freezes** on QMP `stop` (advanced 0.22 s across a 3.27 s wall pause) → `esp_timer` == virtual time, no offset model needed | `firmware/qemu/clock_freeze_probe.py`, V-006 |
-| **Risk #1 — barrier, throughput** | QMP `stop`/`cont` over a **UNIX socket** costs ~0.75 ms/cycle → **421 slices/s @ 1 ms**, 919/s @ 250 µs (≥100/s bar cleared) | `firmware/qemu/barrier_overhead_probe.py`, V-007 |
-| **Risk #1 — barrier, latency fidelity** | Real node, 300 frames: **1 ms slice → 52.5 % error (fail); 250 µs slice → 14.3 % (pass)** | `firmware/qemu/barrier_latency_probe.py`, V-008 |
-
-**Bottom line:** the driver-layer-shim + host-medium + QMP-barrier architecture (research brief's
-recommendation) is **viable**. Retiring these three risks is what the feasibility phase was for.
-
----
-
-## Key design conclusions (measured, not assumed)
-
-1. **Use `--wrap` for the shim, always.** Providing `esp_now_*` symbols from a component looks
-   like it links but silently loses to IDF's archive. `--wrap` is mandatory (D-021).
-2. **QMP must ride a UNIX socket, never TCP.** TCP QMP measured **88 ms/cycle** (delayed-ACK
-   artifact); UNIX socket is **~0.75 ms** — a 100× difference that would otherwise be invisible.
-3. **`esp_timer` == virtual time** under the barrier, because the guest clock freezes on `stop`.
-   This is the cleanest possible time model — no drift/offset tracking (D-022, V-006).
-4. **Default the barrier slice to 250 µs for ESP-NOW latency experiments** (not 1 ms). At 250 µs,
-   both throughput (919/s) and latency fidelity (14.3 %) pass; 1 ms fails fidelity because the
-   barrier overhead is the same order as the ~0.9 ms MAC latency. For experiments needing exact
-   timing, **deterministic offline mode** removes quantization entirely (trace timestamps are
-   already exact at any slice).
-
----
-
-## Honest limitations (what is NOT yet done)
-
-- **No full multi-node run yet.** M1 + the three spikes are done; the medium/orchestration layer
-  is unit-tested against a Python stand-in (`MockNode`, 56 tests) but has not yet driven two real
-  QEMU nodes through a shared barrier. That integration is the immediate next step.
-- **The latency number is a one-hop lower bound.** It measures the medium's dispatch quantization
-  (sender→dispatch); a full sender→receiver→app round trip adds the receiver's slice. 14.3 % at
-  250 µs could grow two-hop; offline mode is the exact-fidelity answer.
-- **No hardware validation.** All numbers are QEMU + host. The tool-paper centerpiece — virtual
-  vs. real ESP32-S3 ESP-NOW latency/PDR — still requires physical boards (`docs/VALIDATION.md`).
-- **Model self-consistency only:** the ~200 m emergent range matching published ESP-NOW range
-  (V-001) is a units check, not validation.
-
----
-
-## Recommended next steps
-
-1. **First honest M2:** wire `QemuNodeHandle`'s QMP gate into the clock master and run
-   `two_node.yaml` with one real QEMU node + one MockNode through the shared barrier.
-2. Two real QEMU nodes; confirm end-to-end reactive latency two-hop at 250 µs / offline.
-3. Hardware validation plot (virtual vs. real), then M4 (Wi-Fi gateway) and M6 (GUI).
-
----
-
-*All decisions and the full derivation are in [`RESEARCH_LOG.md`](../RESEARCH_LOG.md)
-(D-000 … D-025, V-001 … V-008). Milestone-by-milestone status in
-[`MILESTONES.md`](MILESTONES.md).*
+Success: PDR curves overlap within measurement variance on one nontrivial multi-node scenario,
+and the latency gap is explained by the quantum.

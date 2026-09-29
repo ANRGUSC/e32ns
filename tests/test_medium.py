@@ -1,10 +1,6 @@
 """Tests for the RadioMedium engine (medium.py): ESP-NOW semantics + collision."""
 
-import pytest
-
-from esp_netsim.medium import (
-    MediumEngine, MediumConfig, Frame, ESP_NOW_MAX_DATA_LEN,
-)
+from esp_netsim.medium import MediumEngine, MediumConfig, Frame
 from esp_netsim.channel.error_model import ConstantErrorModel
 from esp_netsim.protocol import BROADCAST_MAC
 

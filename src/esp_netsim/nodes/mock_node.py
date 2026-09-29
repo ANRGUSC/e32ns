@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from .. import protocol
@@ -50,7 +50,6 @@ class MockNode:
         self.schedule: list[ScheduledTx] = []
         self.received: list[ReceivedFrame] = []
         self.send_status: dict[int, str] = {}      # seq -> "success"/"fail"
-        self.slice_us: Optional[int] = None
         self._running = True
 
     # ---- scripting ----------------------------------------------------------
@@ -95,7 +94,6 @@ class MockNode:
 
     async def _handle(self, msg: Message) -> None:
         if msg.type == protocol.WELCOME:
-            self.slice_us = msg.get("slice_us")
             self._welcomed.set()
         elif msg.type == protocol.RUN_SLICE:
             await self._run_slice(msg.get("until_t"))

@@ -1,121 +1,112 @@
-# esp-netsim — a Cooja-like network emulator for ESP32-S3
+# esp-netsim: a Cooja-like network emulator for ESP32-S3
 
-Run a network of **virtual ESP32-S3 nodes** on a laptop: describe a topology and link
-conditions, run the same ESP-IDF firmware each node would run on real hardware, and let a
-custom **wireless-link medium** decide when ESP-NOW / Wi-Fi frames are delivered, lost,
-delayed, or collide. Inspired by Contiki's Cooja; built for ANRG.
+Describe a network of ESP32-S3 nodes in a YAML file, give each node an ESP-IDF firmware
+build, and run the whole experiment on one machine. Every node is its own Espressif QEMU
+instance running unmodified ESP-IDF code. Instead of a radio, each node talks to a host-side
+wireless medium, which decides when ESP-NOW and Wi-Fi frames are delivered, delayed, lost,
+or collide, from the nodes' positions and link model. Wi-Fi stations reach the real Internet
+through a virtual access point.
 
-> Every design decision in this repo is recorded, with rationale and sources, in
-> **[`RESEARCH_LOG.md`](RESEARCH_LOG.md)** (decisions `D-000…`, validations `V-…`).
+Every decision, measurement and known limitation is in [`RESEARCH_LOG.md`](RESEARCH_LOG.md).
 
-> **Honest status (see [`RESEARCH_LOG.md`](RESEARCH_LOG.md) (Appendix F — status update)).**
-> Feasibility is **retired**: real ESP-IDF firmware boots on emulated ESP32-S3 (M1), a real
-> ESP-NOW frame travels from firmware into the host medium (risk #2), the `esp_now_*` shim
-> interposes via `--wrap` (risk #3), and the QMP barrier is validated on-target — clock-freeze
-> holds, throughput passes, latency fidelity passes at a 250 µs slice (risk #1). **Not yet done:**
-> a full multi-node run driving two real QEMU nodes through a shared barrier (the medium/
-> orchestration layer below is unit-tested against a Python stand-in, `MockNode`), and hardware
-> validation. No milestone beyond M1 is "complete." Details + evidence in the status update.
+## What works
 
-## What is built and tested (software layer, against a Python stand-in)
+| Milestone | Status | Scenario |
+|-----------|--------|----------|
+| M1 single node boots, UART captured | done | any scenario; logs land in `out/<name>/nodeN.log` |
+| M2 two nodes, controlled delivery and loss | done, real firmware | `configs/m2_two_qemu.yaml` |
+| M3 multi-node ESP-NOW with traces | done, real firmware | `configs/m3_espnow_line.yaml` |
+| M4 Wi-Fi station to the real Internet | done, real firmware | `configs/m4_wifi_gateway.yaml` |
+| M5 config file launches every node, collects results | done | `esp-netsim run <scenario>` |
+| M6 visualization of nodes, links, packets, consoles | done (replay page per run) | `out/<name>/report.html` |
 
-The host-side medium/orchestration is implemented and unit-tested in pure Python — the wireless
-medium, the SliceTime-style barrier clock, the wire protocol, pcapng tracing, config, and a
-CLI — driven by a built-in **mock node** that speaks the same protocol a QEMU node will. This
-is a **CI/unit harness for the medium**, not a demonstration of real firmware.
+The brief's example workflow (20 nodes, firmware A on some, firmware B on others, Wi-Fi from
+selected nodes) is `configs/example_20_nodes.yaml`.
+
+Not done: validation against physical ESP32-S3 boards. Timing is quantized to the barrier
+step, which QMP overhead holds at 1.5 to 4 ms of virtual time (V-010); delivery, loss and
+ordering are exact.
+
+## Run it
+
+Mock nodes (pure Python stand-ins, any OS) exercise the medium without QEMU:
 
 ```bash
-pip install -e .
-esp-netsim validate configs/multi_node_espnow.yaml
-esp-netsim run      configs/multi_node_espnow.yaml     # writes out/*.pcapng, prints stats
+pip install -e ".[dev]"
+esp-netsim run configs/two_node.yaml
+pytest
 ```
 
-Example output (5 nodes in a line, physical SNR→PER model):
+Real firmware needs Linux or WSL2, ESP-IDF v5.4.2 and the Espressif QEMU fork:
 
-```
-transmissions  : 8  (success 8, fail 0)
-receptions     : delivered 32, dropped 0
-trace written  : out/multi_node_espnow.pcapng
-  node 5 (aa:bb:cc:00:00:05): received 8 frames
-```
-
-Open the `.pcapng` in Wireshark: radiotap headers + synthesized ESP-NOW action frames,
-each annotated with the medium's SNR / PER / loss-reason in a per-packet comment.
-
-## The QEMU + ESP-IDF path (built and proven on-target)
-
-`firmware/components/espnet_shim` (overrides `esp_now_*` via `--wrap`, pipes frames to the
-medium) + `firmware/examples/espnet_node` (open_eth+DHCP node) + `orchestrator/qemu_launcher.py`
-(QMP `stop`/`cont` gate). Runs under ESP-IDF v5.4.2 + Espressif QEMU 9.0.0 in WSL2: real firmware
-boots (M1), a real ESP-NOW frame reaches the host medium (risk #2), and the barrier is validated
-(risk #1). Bring-up runbook + probe scripts: **[`RESEARCH_LOG.md` Appendix D](RESEARCH_LOG.md)**
-and `firmware/qemu/`.
-
-Because both node kinds are clients of one wire protocol, a scenario validated with
-mock nodes behaves identically when a node is swapped for QEMU+shim (D-002/D-015).
-
-## Architecture at a glance
-
-```
-   MockNode / QEMU+espnet_shim   ── TCP (len-prefixed binary) ─►  MediumServer
-        (virtual ESP32 nodes)                                        │
-                                                                     ▼
-                                            ┌──────────  Simulation (barrier clock, D-004)
-                                            │            snapshot nodes → RUN_SLICE →
-                                            │            collect TX → wait SLICE_DONE →
-                                            ▼            process batch → dispatch RX/STATUS
-                                     MediumEngine  (medium.py)
-                                            │  positions, ESP-NOW semantics (D-012)
-                     ┌──────────────────────┼──────────────────────┐
-                     ▼                      ▼                       ▼
-              pathloss (D-006)     error_model (D-007)       airtime/DCF (D-008)
-              log-distance         constant | UDGM | SNR→PER  DIFS/SIFS/backoff
-                                            │
-                                            ▼
-                                   pcapng + radiotap trace (D-016)
+```bash
+firmware/qemu/setup_esp_idf.sh                 # one time: ESP-IDF, QEMU, libslirp
+. ~/esp/esp-idf/export.sh
+for app in espnow_ping espnow_pong wifi_http; do idf.py -C firmware/examples/$app build; done
+pip install -e ".[qemu]"
+export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH   # only if setup fetched libslirp
+esp-netsim run configs/m2_two_qemu.yaml
 ```
 
-See **[`RESEARCH_LOG.md`](RESEARCH_LOG.md)** Appendix A (architecture) and Appendix B (protocol).
+## Scenario files
 
-## Wireless-medium models
+```yaml
+name: my_experiment
+wifi_ap: { pos: [0, 0], channel: 6 }            # optional virtual access point
+nodes:
+  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0, 0],  channel: 6, firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [60, 0], channel: 6, firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [20, 5], channel: 6, firmware: ../firmware/examples/wifi_http/build, wifi: true }
+medium:
+  error_model: snr_per        # or: constant, with packet_error_rate
+run:
+  duration_us: 5000000
+  slice_us: 250
+  seed: 1
+```
 
-| Model      | What it does                                   | Use |
-|------------|------------------------------------------------|-----|
-| `constant` | fixed packet-error rate                        | M2 controlled-loss link |
-| `range`    | Cooja **UDGM**: deliver inside `tx_range`      | familiar Cooja knob |
-| `snr_per`  | log-distance path loss → SNR → per-modulation BER → PER | M3 physical model |
+`firmware` is an ESP-IDF build directory, relative to the scenario file. A node without
+`firmware` is a mock node driven by the scenario's `traffic` list (see `configs/two_node.yaml`).
 
-Plus 802.11 DCF airtime, SINR-vs-summed-interference collision with capture, and a
-single seeded RNG for byte-reproducible runs. A first sanity check (`RESEARCH_LOG.md`
-**V-001**) shows the model's emergent range (~200 m) matches published ESP-NOW LOS
-range (190–250 m).
+## What a run produces (`out/<name>/`)
+
+- `report.html`: replay of the run, with node map, links coloured by delivery ratio, each frame
+  animated, and each node's console
+- `trace.pcapng`: every frame and every receiver's verdict; open in Wireshark (ESP-NOW as
+  vendor action frames, Wi-Fi as 802.11 data frames carrying the real IP traffic)
+- `results.json`: topology, totals, and one row per frame and receiver
+- `nodeN.log`: each firmware node's UART output
+
+## Bringing your own firmware
+
+Any ESP-NOW or Wi-Fi station app that builds for esp32s3 runs unmodified. Point the project at
+the shim and enable the emulated Ethernet MAC:
+
+```cmake
+set(EXTRA_COMPONENT_DIRS "<repo>/firmware/components")   # in the project CMakeLists.txt
+```
+
+```
+CONFIG_IDF_TARGET="esp32s3"                              # in sdkconfig.defaults
+CONFIG_ETH_USE_OPENETH=y
+```
+
+The shim takes over `esp_now_*` and the Wi-Fi bring-up calls via linker `--wrap`. It reads
+each node's ID, MAC and channel from NVS, which the runner writes per node, so one build
+serves every node that runs it. Build the same app with `-DESPNET_HARDWARE=1` for real boards.
 
 ## Layout
 
 ```
-src/esp_netsim/         host-side simulator (Python, tested)
-  protocol.py           wire codec           channel/    pathloss, error_model, airtime
-  medium.py             RadioMedium engine   orchestrator/ simulation, runner, qemu_launcher
-  transport/            asyncio TCP server   nodes/      mock_node
-  config/  trace/  cli.py
-firmware/               ESP-IDF shim + example apps (C) + qemu/ probe scripts
-configs/                example scenarios (YAML)
-tests/                  pytest suite (56 tests)
-docs/                   raw evidence logs (m1_qemu_boot, spike2_evidence)
-RESEARCH_LOG.md         single source of truth: every decision + validation + folded reference
+src/esp_netsim/
+  medium.py              wireless medium: carrier sense, collisions, retries, ESP-NOW semantics
+  channel/               path loss, SNR->PER, 802.11 airtime
+  orchestrator/          barrier clock, scenario runner, QEMU launcher, Wi-Fi bridge
+  protocol.py            node <-> medium wire format (mirrored by the C shim)
+  config/ trace/ nodes/ transport/ cli.py
+firmware/components/espnet_shim/   the ESP-IDF shim (C)
+firmware/examples/                 firmware A (espnow_ping), B (espnow_pong), C (wifi_http)
+configs/                           scenarios
+tests/                             pytest suite
+docs/                              raw evidence logs from the feasibility spikes
 ```
-
-## Tests
-
-```bash
-pip install -e . pytest pytest-asyncio pyyaml
-pytest -q          # 56 passing: protocol, channel physics, medium semantics, e2e, config, trace
-```
-
-## Status vs. the project milestones
-
-**M1 done with real firmware; the three feasibility risks are retired** (shim linkage via
-`--wrap`, transport out of QEMU, and the QMP barrier — clock-freeze/throughput/latency all
-measured on-target). Not yet done: a full multi-node run driving real QEMU nodes through a
-shared barrier (medium layer is unit-tested against `MockNode`), and hardware validation.
-Full breakdown: [`RESEARCH_LOG.md` Appendix C](RESEARCH_LOG.md).
