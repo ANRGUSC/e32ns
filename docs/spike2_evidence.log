@@ -1,0 +1,24 @@
+Spike #2 (transport) — PROVEN end-to-end, captured on WSL2 Ubuntu 24.04.
+Toolchain: ESP-IDF v5.4.2, Espressif QEMU 9.0.0 (esp_develop_9.0.0_20240606).
+Path: real firmware -> --wrap'd esp_now_send -> lwIP socket -> open_eth NIC ->
+      slirp user-net NAT (guest 10.0.2.15 -> host 10.0.2.2) -> host Python medium.
+
+=== GUEST (emulated esp32s3, ESP-IDF v5.4.2 firmware) ===
+I (335)  node: waiting for DHCP...
+I (1342) node: GOT_IP 10.0.2.15
+I (1342) espnet_tx: connected to medium 10.0.2.2:52333
+I (1342) espnet_shim: esp_now_init (shim): node 1 -> 10.0.2.2:52333
+I (1342) node: HELLO+TX emitted
+
+=== HOST MEDIUM (Python, real esp_netsim.protocol codec, BINARY wire) ===
+LISTENER up on 127.0.0.1:52333
+CONN from ('127.0.0.1', 50290)
+RECV HELLO {'node': 1, 'mac': 'aa:bb:cc:00:00:01', 'caps': {'espnow': True, 'wifi': False}}
+RECV TX    {'node': 1, 't': 1503828, 'src': 'aa:bb:cc:00:00:01', 'dst': 'ff:ff:ff:ff:ff:ff', 'channel': 1, 'rate_mbps': 1.0, 'seq': 1, 'data_bytes': 1}
+
+Interpretation: a real ESP-NOW broadcast issued by unmodified-application firmware inside
+QEMU was intercepted by the espnet_shim (via --wrap), serialized to the BINARY wire protocol
+(D-019), sent out of the VM over open_eth, and decoded by the host medium's actual codec.
+The `t` field carries esp_timer micros (1503828 = ~1.5 s uptime), the guest virtual-time
+stamp (D-022) — no longer 0. The transport + binary codec are proven end-to-end across the
+C/Python boundary, not merely "connect executed."

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esp-netsim"
+version = "0.1.0"
+description = "A Cooja-like network emulator for ESP32-S3: virtual QEMU nodes over a custom wireless-link medium (Wi-Fi + ESP-NOW)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ANRG" }]
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Optional accelerator for the medium's N x N path-loss math at large scale (see D-001).
+accel = ["numpy>=1.24"]
+dev = ["pytest>=7.4", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+esp-netsim = "esp_netsim.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.esp_netsim]
+# Non-code project knobs are documented in RESEARCH_LOG.md; runtime config is YAML (see configs/).

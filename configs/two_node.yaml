@@ -1,0 +1,31 @@
+# M2 — two-node controlled link (brief §9). A deterministic constant-loss link.
+name: two_node_controlled_link
+
+nodes:
+  - id: 1
+    mac: "aa:bb:cc:00:00:01"
+    pos: [0, 0]      # metres
+    channel: 1
+  - id: 2
+    mac: "aa:bb:cc:00:00:02"
+    pos: [5, 0]
+    channel: 1
+
+medium:
+  error_model: constant     # constant | snr_per
+  packet_error_rate: 0.1    # 10% loss on every frame
+
+run:
+  duration_us: 100000       # 100 ms of virtual time
+  slice_us: 1000            # 1 ms barrier slice (D-004)
+  seed: 1
+  trace_path: out/two_node.pcapng
+
+# Scripted traffic for the mock-node demo: node 1 unicasts to node 2 every 10 ms.
+traffic:
+  - node: 1
+    dst: "aa:bb:cc:00:00:02"
+    at_us: 5000
+    size_bytes: 32
+    count: 10
+    period_us: 10000

@@ -1,0 +1,53 @@
+Adding SPI flash device
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x1 (POWERON),boot:0x4 (SPI_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2810,len:0x1564
+load:0x403c8700,len:0x4
+load:0x403c8704,len:0xd24
+load:0x403cb700,len:0x2ed4
+entry 0x403c8928
+I (55) boot: ESP-IDF v5.4.2 2nd stage bootloader
+I (56) boot: compile time Aug 31 2026 18:02:52
+I (56) boot: Multicore bootloader
+I (60) boot: chip revision: v0.3
+I (60) boot: efuse block revision: v0.0
+I (61) boot.esp32s3: Boot SPI Speed : 80MHz
+I (61) boot.esp32s3: SPI Mode       : DIO
+I (61) boot.esp32s3: SPI Flash Size : 2MB
+I (63) boot: Enabling RNG early entropy source...
+I (65) boot: Partition Table:
+I (65) boot: ## Label            Usage          Type ST Offset   Length
+I (66) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (66) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (66) boot:  2 factory          factory app      00 00 00010000 00100000
+I (67) boot: End of partition table
+I (68) esp_image: segment 0: paddr=00010020 vaddr=3c020020 size=0a458h ( 42072) map
+I (75) esp_image: segment 1: paddr=0001a480 vaddr=3fc92400 size=02a38h ( 10808) load
+I (77) esp_image: segment 2: paddr=0001cec0 vaddr=40374000 size=03158h ( 12632) load
+I (80) esp_image: segment 3: paddr=00020020 vaddr=42000020 size=17a08h ( 96776) map
+I (93) esp_image: segment 4: paddr=00037a30 vaddr=40377158 size=0b21ch ( 45596) load
+I (100) esp_image: segment 5: paddr=00042c54 vaddr=600fe000 size=0001ch (    28) load
+I (101) boot: Loaded app from partition at offset 0x10000
+I (102) boot: Disabling RNG early entropy source...
+W (230) rtcinit: o_code calibration fail
+
+I (117) cpu_start: Multicore app
+I (130) cpu_start: Pro cpu start user code
+I (130) cpu_start: cpu freq: 160000000 Hz
+I (130) app_init: Application information:
+I (139) main_task: Calling app_main()
+Hello world!
+This is esp32s3 chip with 2 CPU core(s), WiFi/BLE, silicon revision v0.3, 2MB external flash
+Minimum free heap size: 390052 bytes
+Restarting in 10 seconds...
+Restarting in 9 seconds...
+Restarting in 8 seconds...
+Restarting in 7 seconds...
+Restarting in 6 seconds...
+Restarting in 5 seconds...
+Restarting in 4 seconds...
+Restarting in 3 seconds...
+Restarting in 2 seconds...
