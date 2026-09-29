@@ -1,60 +1,38 @@
-/*
- * espnow_ping — a minimal ESP-NOW app that runs UNMODIFIED on real hardware and
- * under esp-netsim's QEMU path (D-017). On hardware it uses the real radio; under
- * emulation the espnet_shim component supplies esp_now_* and bridges to the host
- * medium. The only emulation-specific line is espnet_shim_start() guarded by a
- * build flag, so the same source targets both.
- *
- * Behavior: node broadcasts a counter every 100 ms and logs anything it receives.
- */
+/* Firmware A: broadcast a timestamped ping every PERIOD_MS and log the RTT of each reply. */
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_now.h"
+#include "esp_timer.h"
+#include "espnow_common.h"
 
-#ifdef CONFIG_ESPNET_EMULATION
-#include "espnet_shim.h"
-#endif
+#define PERIOD_MS 100
 
-static const char *TAG = "espnow_ping";
-static const uint8_t BCAST[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
-
-static void on_send(const uint8_t *mac, esp_now_send_status_t status) {
-    ESP_LOGI(TAG, "send-cb: %s", status == ESP_NOW_SEND_SUCCESS ? "SUCCESS" : "FAIL");
-}
+static const char *TAG = "ping";
+static const uint8_t BCAST[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
 static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-    ESP_LOGI(TAG, "recv %d bytes, first=%d", len, len > 0 ? data[0] : -1);
+    ping_msg_t m;
+    if (len != sizeof m) return;
+    memcpy(&m, data, sizeof m);
+    if (m.kind != 'R') return;
+    ESP_LOGI(TAG, "RTT seq=%lu from " MACSTR " rssi=%d rtt_us=%lld", (unsigned long)m.seq,
+             MAC2STR(info->src_addr), info->rx_ctrl->rssi, esp_timer_get_time() - m.t0_us);
 }
 
 void app_main(void) {
-#ifdef CONFIG_ESPNET_EMULATION
-    /* Identity + medium endpoint would normally come from sdkconfig / NVS. */
-    espnet_shim_config_t cfg = {
-        .node_id = CONFIG_ESPNET_NODE_ID,
-        .mac = { 0xaa,0xbb,0xcc,0x00,0x00, (uint8_t)CONFIG_ESPNET_NODE_ID },
-        .channel = 1,
-        .medium_host = "10.0.2.2",   /* QEMU user-net host alias */
-        .medium_port = 52333,
-    };
-    espnet_shim_start(&cfg);
-#endif
-
-    ESP_ERROR_CHECK(esp_now_init());
-    ESP_ERROR_CHECK(esp_now_register_send_cb(on_send));
+    espnow_bringup();
     ESP_ERROR_CHECK(esp_now_register_recv_cb(on_recv));
-
-    esp_now_peer_info_t peer = {0};
+    esp_now_peer_info_t peer = { .channel = ESPNOW_CHANNEL };
     memcpy(peer.peer_addr, BCAST, 6);
-    peer.channel = 1;
-    peer.encrypt = false;
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));
 
-    uint8_t counter = 0;
-    for (;;) {
-        esp_now_send(BCAST, &counter, 1);
-        counter++;
-        vTaskDelay(pdMS_TO_TICKS(100));
+    for (uint32_t seq = 1;; seq++) {
+        ESP_LOGI(TAG, "PING seq=%lu", (unsigned long)seq);
+        ping_msg_t m = { .kind = 'P', .seq = seq, .t0_us = esp_timer_get_time() };
+        esp_now_send(BCAST, (const uint8_t *)&m, sizeof m);
+        vTaskDelay(pdMS_TO_TICKS(PERIOD_MS));
     }
 }

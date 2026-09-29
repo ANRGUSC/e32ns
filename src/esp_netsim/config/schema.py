@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -20,6 +21,7 @@ class NodeConfig:
     y: float = 0.0
     z: float = 0.0
     channel: int = 1
+    firmware: Optional[str] = None   # ESP-IDF build dir; None runs a MockNode
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,7 @@ class ScenarioConfig:
     duration_us: int = 1_000_000
     slice_us: int = 1000
     seed: int = 0
-    trace_path: Optional[str] = None
+    out_dir: str = "out"
     port: int = 0
     traffic: tuple = ()
 
@@ -88,7 +90,7 @@ def _require(d: dict, key: str, ctx: str):
     return d[key]
 
 
-def parse_scenario(doc: dict) -> ScenarioConfig:
+def parse_scenario(doc: dict, base_dir: str = ".") -> ScenarioConfig:
     if not isinstance(doc, dict):
         raise ValueError("scenario must be a mapping at the top level")
     raw_nodes = _require(doc, "nodes", "scenario")
@@ -112,18 +114,21 @@ def parse_scenario(doc: dict) -> ScenarioConfig:
             raise ValueError(f"{ctx}.pos must be [x, y] or [x, y, z]")
         z = float(pos[2]) if len(pos) > 2 else 0.0
         nodes.append(NodeConfig(node_id=nid, mac=mac, x=float(pos[0]), y=float(pos[1]),
-                                z=z, channel=int(rn.get("channel", 1))))
+                                z=z, channel=int(rn.get("channel", 1)),
+                                firmware=_parse_firmware(rn.get("firmware"), base_dir, ctx)))
 
     run = doc.get("run", {})
+    name = doc.get("name", "scenario")
     return ScenarioConfig(
-        name=doc.get("name", "scenario"), nodes=tuple(nodes),
+        name=name, nodes=tuple(nodes),
         medium=_parse_medium(doc.get("medium", {})),
         duration_us=int(run.get("duration_us", 1_000_000)),
         slice_us=int(run.get("slice_us", 1000)),
         seed=int(run.get("seed", 0)),
-        trace_path=run.get("trace_path"),
+        out_dir=run.get("out_dir", os.path.join("out", name)),
         port=int(run.get("port", 0)),
-        traffic=tuple(_parse_traffic(doc.get("traffic", []), seen_ids)),
+        traffic=tuple(_parse_traffic(doc.get("traffic", []),
+                                     {n.node_id for n in nodes if n.firmware is None})),
     )
 
 
@@ -137,7 +142,8 @@ def _parse_traffic(raw: Any, valid_ids: set) -> list:
         ctx = f"traffic[{i}]"
         nid = int(_require(t, "node", ctx))
         if nid not in valid_ids:
-            raise ValueError(f"{ctx}: node {nid} is not a declared node")
+            raise ValueError(f"{ctx}: node {nid} is not a declared mock node "
+                             "(firmware nodes generate their own traffic)")
         dst = t.get("dst", "broadcast")
         dst = "ff:ff:ff:ff:ff:ff" if dst in ("broadcast", "bcast") else normalize_mac(dst)
         out.append(TrafficConfig(
@@ -146,6 +152,18 @@ def _parse_traffic(raw: Any, valid_ids: set) -> list:
             rate_mbps=float(t.get("rate_mbps", 1.0)),
             count=int(t.get("count", 1)), period_us=int(t.get("period_us", 0))))
     return out
+
+
+def _parse_firmware(raw: Optional[str], base_dir: str, ctx: str) -> Optional[str]:
+    if raw is None:
+        return None
+    path = os.path.normpath(os.path.join(base_dir, os.path.expanduser(raw)))
+    if not os.path.isfile(os.path.join(path, "flasher_args.json")):
+        raise ValueError(f"{ctx}.firmware: {path} is not an ESP-IDF build dir "
+                         "(no flasher_args.json; run idf.py build)")
+    if os.name == "nt":
+        raise ValueError(f"{ctx}.firmware: QEMU nodes need Linux or WSL (QMP over UNIX sockets)")
+    return path
 
 
 def _parse_medium(m: dict) -> MediumConfigSpec:
@@ -167,4 +185,4 @@ def _parse_medium(m: dict) -> MediumConfigSpec:
 def load_scenario(path: str) -> ScenarioConfig:
     import yaml
     with open(path, "r", encoding="utf-8") as f:
-        return parse_scenario(yaml.safe_load(f))
+        return parse_scenario(yaml.safe_load(f), os.path.dirname(os.path.abspath(path)))

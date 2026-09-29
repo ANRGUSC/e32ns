@@ -103,13 +103,13 @@ def test_encrypted_unicast_requires_matching_lmk():
 
 # ---- collision / SINR (brief §5, D-009/D-013) ------------------------------
 
-def test_two_overlapping_transmitters_collide_at_shared_receiver():
-    # Two senders equidistant from a receiver transmit at the same time on the same
-    # channel; SINR ~ 0 dB < capture threshold -> collision, frame not delivered.
+def test_hidden_terminals_collide_at_shared_receiver():
+    # 140 m apart the senders cannot hear each other (-84 dBm < -82 dBm CCA), so both
+    # transmit at once; SINR ~ 0 dB at the receiver in the middle -> collision.
     eng = make_engine(capture_threshold_db=6.0)
-    eng.add_node(1, MAC1, x=-10, y=0)
-    eng.add_node(2, MAC2, x=10, y=0)
-    eng.add_node(3, MAC3, x=0, y=0)   # receiver in the middle
+    eng.add_node(1, MAC1, x=-70, y=0)
+    eng.add_node(2, MAC2, x=70, y=0)
+    eng.add_node(3, MAC3, x=0, y=0)
     f1 = frame(1, MAC1, BROADCAST_MAC, start=0)
     f2 = frame(2, MAC2, BROADCAST_MAC, start=0)
     outs = eng.process_batch([f1, f2])
@@ -118,6 +118,29 @@ def test_two_overlapping_transmitters_collide_at_shared_receiver():
         v3 = [r for r in out.receivers if r.node_id == 3][0]
         assert not v3.delivered
         assert v3.reason == "collision"
+
+
+def test_unicast_retry_escapes_a_hidden_terminal_collision():
+    eng = make_engine(capture_threshold_db=6.0)
+    eng.add_node(1, MAC1, x=-70, y=0)
+    eng.add_node(2, MAC2, x=70, y=0)
+    eng.add_node(3, MAC3, x=0, y=0)
+    unicast, _ = eng.process_batch([frame(1, MAC1, MAC3, start=0),
+                                    frame(2, MAC2, BROADCAST_MAC, start=0)])
+    # The first attempt collides; the retry goes out after the broadcast has ended.
+    assert (unicast.status, unicast.attempts) == ("success", 2)
+
+
+def test_senders_in_carrier_sense_range_take_turns():
+    eng = make_engine(capture_threshold_db=6.0)
+    eng.add_node(1, MAC1, x=-10, y=0)
+    eng.add_node(2, MAC2, x=10, y=0)
+    eng.add_node(3, MAC3, x=0, y=0)
+    first, second = eng.process_batch([frame(1, MAC1, BROADCAST_MAC, start=0),
+                                       frame(2, MAC2, BROADCAST_MAC, start=0)])
+    assert second.frame.start_us == first.frame.start_us + first.airtime_us
+    for out in (first, second):
+        assert [r.delivered for r in out.receivers if r.node_id == 3] == [True]
 
 
 def test_non_overlapping_transmissions_do_not_collide():

@@ -19,7 +19,6 @@ run:
   duration_us: 100000       # 100 ms of virtual time
   slice_us: 1000            # 1 ms barrier slice (D-004)
   seed: 1
-  trace_path: out/two_node.pcapng
 
 # Scripted traffic for the mock-node demo: node 1 unicasts to node 2 every 10 ms.
 traffic:

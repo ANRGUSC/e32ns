@@ -1,8 +1,4 @@
-"""Tests for the barrier gate abstraction (orchestrator/gate.py, D-026).
-
-Covers the QmpGate lifecycle and a mixed barrier: a QEMU-stand-in node (gated by a
-fake QMP client) sending to a message-gated MockNode receiver, all on one clock master.
-"""
+"""Barrier ordering with QEMU nodes (paused/resumed over QMP) alongside message-gated mocks."""
 
 import asyncio
 
@@ -11,7 +7,6 @@ import pytest
 from esp_netsim.medium import MediumEngine, MediumConfig
 from esp_netsim.channel.error_model import ConstantErrorModel
 from esp_netsim.orchestrator.simulation import Simulation
-from esp_netsim.orchestrator.gate import QmpGate
 from esp_netsim.nodes.mock_node import MockNode
 from esp_netsim.protocol import BROADCAST_MAC
 
@@ -22,29 +17,18 @@ MAC2 = "aa:bb:cc:00:00:02"
 
 
 class FakeQmp:
-    """Records cont/stop; optionally runs an async hook on cont (the guest 'running')."""
+    """Records cont/stop; runs an async hook on cont (the guest 'running')."""
 
-    def __init__(self):
-        self.conts = 0
-        self.stops = 0
-        self.on_cont = None
+    def __init__(self, on_cont):
+        self.events = []
+        self.on_cont = on_cont
 
     async def cont(self):
-        self.conts += 1
-        if self.on_cont is not None:
-            await self.on_cont()
+        self.events.append("cont")
+        await self.on_cont()
 
     async def stop(self):
-        self.stops += 1
-
-
-async def test_qmpgate_cont_then_stop_order():
-    fq = FakeQmp()
-    g = QmpGate(node_id=1, qmp=fq, slice_us=200)
-    await g.release(until_us=200)
-    assert (fq.conts, fq.stops) == (1, 0)   # released = cont
-    await g.wait_barrier()
-    assert (fq.conts, fq.stops) == (1, 1)   # barrier = (dwell then) stop
+        self.events.append("stop")
 
 
 async def test_mixed_barrier_qemu_sender_to_mock_receiver():
@@ -60,9 +44,8 @@ async def test_mixed_barrier_qemu_sender_to_mock_receiver():
     receiver = MockNode(2, MAC2, port=port)
     qnode.schedule_tx(t_us=0, dst_mac=BROADCAST_MAC, payload=b"ping", seq=1)
 
-    fq = FakeQmp()
-    fq.on_cont = lambda: qnode.emit_due(10_000)   # guest "runs" during cont -> emits
-    sim.register_qmp_gate(QmpGate(node_id=1, qmp=fq, slice_us=5000))  # 5 ms wall/slice
+    fq = FakeQmp(on_cont=lambda: qnode.emit_due(10_000))
+    sim.register_qemu_node(1, fq)
 
     for n in (qnode, receiver):
         await n.connect()
@@ -71,8 +54,8 @@ async def test_mixed_barrier_qemu_sender_to_mock_receiver():
     await sim.run(duration_us=3000)   # 3 slices
     await asyncio.sleep(0.1)
 
-    # The QMP gate was actually driven each slice...
-    assert fq.conts >= 1 and fq.stops >= 1
+    # Every slice resumes then pauses the QEMU node, never overlapping two slices.
+    assert fq.events == ["cont", "stop"] * 3
     # ...and the QEMU-stand-in's frame reached the message-gated receiver.
     assert any(r.data == b"ping" for r in receiver.received)
     assert sim.stats.tx_success == 1
@@ -82,8 +65,7 @@ async def test_mixed_barrier_qemu_sender_to_mock_receiver():
         await n.close()
 
 
-async def test_no_qmp_gate_is_unchanged_behavior():
-    # With no QMP gate, a plain two-mock-node run still works (regression guard).
+async def test_mock_only_run():
     engine = MediumEngine(MediumConfig(error_model=ConstantErrorModel(0.0)))
     engine.add_node(1, MAC1, x=0)
     engine.add_node(2, MAC2, x=1)
@@ -99,6 +81,30 @@ async def test_no_qmp_gate_is_unchanged_behavior():
     await asyncio.sleep(0.1)
     assert a.send_status.get(1) == "success"
     assert any(r.data == b"x" for r in b.received)
+    await sim.stop()
+    for n in (a, b):
+        await n.close()
+
+
+async def test_rx_is_held_until_its_computed_delivery_time():
+    engine = MediumEngine(MediumConfig(error_model=ConstantErrorModel(0.0)))
+    engine.add_node(1, MAC1, x=0)
+    engine.add_node(2, MAC2, x=1)
+    sim = Simulation(engine, slice_us=250)
+    port = await sim.start()
+    a = MockNode(1, MAC1, port=port)
+    b = MockNode(2, MAC2, port=port)
+    a.schedule_tx(t_us=0, dst_mac=BROADCAST_MAC, payload=b"x" * 16, seq=1)
+    for n in (a, b):
+        await n.connect()
+    await sim.wait_for_nodes(2)
+    await sim.run(duration_us=250)   # the frame's airtime (~0.5 ms) outlasts one slice
+    await asyncio.sleep(0.05)
+    assert b.received == []
+    await sim.run(duration_us=1500)
+    await asyncio.sleep(0.05)
+    assert [r.data for r in b.received] == [b"x" * 16]
+    assert b.received[0].t_us > 250
     await sim.stop()
     for n in (a, b):
         await n.close()

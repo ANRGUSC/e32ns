@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 
 from . import __version__
 from .config.schema import load_scenario
-from .orchestrator.runner import run_scenario_sync
+from .orchestrator.runner import run_scenario
 
 
 def _cmd_validate(args) -> int:
@@ -25,32 +26,29 @@ def _cmd_validate(args) -> int:
 
 def _cmd_run(args) -> int:
     sc = load_scenario(args.scenario)
-    if args.trace:
-        sc = sc.__class__(**{**sc.__dict__, "trace_path": args.trace})
-    print(f"Running '{sc.name}': {len(sc.nodes)} nodes, {sc.duration_us} us "
-          f"@ {sc.slice_us} us slices (seed {sc.seed})...")
-    result = run_scenario_sync(sc, trace_override=args.trace)
+    qemu = sum(1 for n in sc.nodes if n.firmware)
+    print(f"Running '{sc.name}': {len(sc.nodes)} nodes ({qemu} QEMU, {len(sc.nodes) - qemu} mock), "
+          f"{sc.duration_us} us @ {sc.slice_us} us slices (seed {sc.seed})...")
+    result = asyncio.run(run_scenario(sc))
     s = result.stats
-    print("--- results ---")
-    print(f"slices run     : {s.slices}")
+    print(f"slices run     : {s.slices} (effective quantum {sc.duration_us // max(s.slices, 1)} us "
+          "of virtual time)")
     print(f"transmissions  : {s.tx_total}  (success {s.tx_success}, fail {s.tx_fail})")
     print(f"receptions     : delivered {s.rx_delivered}, dropped {s.rx_dropped}")
-    if s.tx_total:
-        pdr = s.tx_success / s.tx_total
-        print(f"send-callback PDR: {pdr:.1%}")
-    if result.trace_path:
-        print(f"trace written  : {result.trace_path}")
-    # Per-node received counts (mock-node inspection).
-    for nid, node in sorted(result.nodes.items()):
-        print(f"  node {nid} ({node.mac}): received {len(node.received)} frames")
+    for n in sc.nodes:
+        sent = len({(e["src"], e["seq"]) for e in result.events if e["src"] == n.node_id})
+        got = sum(1 for e in result.events if e["rx"] == n.node_id and e["delivered"])
+        kind = "qemu" if n.firmware else "mock"
+        print(f"  node {n.node_id} ({kind}, {n.mac}): sent {sent}, received {got}")
+    print(f"results        : {result.out_dir}/ (trace.pcapng, results.json, node logs)")
     return 0
 
 
 def _cmd_info(args) -> int:
     print(f"esp-netsim {__version__}")
-    print("error models : constant | range (UDGM) | snr_per (YANS-style)")
+    print("error models : constant | snr_per (YANS-style)")
     print("trace format : pcapng + radiotap (LINKTYPE 127), simulation-clock us")
-    print("node kinds   : mock (built-in) | qemu (see docs/QEMU_INTEGRATION.md)")
+    print("node kinds   : mock (built-in) | qemu (node 'firmware:' = ESP-IDF build dir)")
     return 0
 
 
@@ -60,9 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"esp-netsim {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pr = sub.add_parser("run", help="run a scenario end-to-end (mock nodes)")
-    pr.add_argument("scenario", help="path to scenario YAML/JSON")
-    pr.add_argument("--trace", help="override trace output path (.pcapng)")
+    pr = sub.add_parser("run", help="run a scenario end to end")
+    pr.add_argument("scenario", help="path to scenario YAML")
     pr.set_defaults(func=_cmd_run)
 
     pv = sub.add_parser("validate", help="validate a scenario file")

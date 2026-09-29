@@ -21,7 +21,6 @@ run:
   duration_us: 200000
   slice_us: 1000
   seed: 7
-  trace_path: out/multi_node_espnow.pcapng
 
 # Node 1 broadcasts a beacon every 20 ms; delivery to nodes 2..5 should degrade
 # with distance under the snr_per model.

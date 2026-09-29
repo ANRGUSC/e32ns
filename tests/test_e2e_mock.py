@@ -5,6 +5,7 @@ transport, the SliceTime barrier, and ESP-NOW send/recv semantics.
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -13,6 +14,8 @@ from esp_netsim.channel.error_model import ConstantErrorModel
 from esp_netsim.orchestrator.simulation import Simulation
 from esp_netsim.nodes.mock_node import MockNode
 from esp_netsim.protocol import BROADCAST_MAC
+from esp_netsim.config.schema import parse_scenario
+from esp_netsim.orchestrator.runner import run_scenario
 
 pytestmark = pytest.mark.asyncio
 
@@ -73,7 +76,7 @@ async def test_unicast_controlled_loss_end_to_end():
         await n.connect()
     await sim.wait_for_nodes(2)
 
-    await sim.run(duration_us=2000)
+    await sim.run(duration_us=5000)   # 3 lost attempts: the send callback lands ~2.9 ms in
     await _drain()
 
     assert n1.send_status.get(7) == "fail"
@@ -111,3 +114,18 @@ async def test_unicast_success_end_to_end():
     await sim.stop()
     for n in (n1, n2):
         await n.close()
+
+
+async def test_run_scenario_writes_results(tmp_path):
+    doc = {"name": "t",
+           "nodes": [{"id": 1, "mac": "aa:bb:cc:00:00:01", "pos": [0, 0]},
+                     {"id": 2, "mac": "aa:bb:cc:00:00:02", "pos": [5, 0]}],
+           "medium": {"error_model": "constant", "packet_error_rate": 0.0},
+           "run": {"duration_us": 20000, "out_dir": str(tmp_path)},
+           "traffic": [{"node": 1, "dst": "broadcast", "at_us": 1000, "count": 3,
+                        "period_us": 5000}]}
+    result = await run_scenario(parse_scenario(doc))
+    saved = json.loads((tmp_path / "results.json").read_text())
+    assert result.stats.rx_delivered == 3
+    assert [(e["src"], e["rx"], e["delivered"]) for e in saved["events"]] == [(1, 2, True)] * 3
+    assert (tmp_path / "trace.pcapng").stat().st_size > 0

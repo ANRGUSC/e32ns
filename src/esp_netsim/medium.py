@@ -96,6 +96,7 @@ class MediumConfig:
     noise_figure_db: float = 7.0        # typical Wi-Fi front-end NF
     bandwidth_hz: float = 22_000_000.0  # DSSS channel width (brief §5)
     capture_threshold_db: float = 4.0   # min SINR to capture a frame (brief §3/§5)
+    cca_threshold_dbm: float = -82.0    # 802.11 preamble-detect level: at or above, a sender defers
     max_retries: int = 3                # unicast MAC retransmissions (brief §3, D-012)
     max_data_len: int = ESP_NOW_MAX_DATA_LEN
     seed: int = 0
@@ -146,23 +147,19 @@ class MediumEngine:
         frames from earlier slices (D-013). Returns one TxOutcome per frame,
         in input order.
         """
-        # Pre-compute airtime windows for every frame in the batch.
-        windows: dict[int, tuple[int, int]] = {}
-        airtimes: dict[int, int] = {}
-        for idx, f in enumerate(frames):
-            acknowledged = not f.broadcast
-            at = self.cfg.airtime.tx_airtime_us(len(f.payload), f.rate_mbps,
-                                                acknowledged, self._rng)
-            airtimes[idx] = at
-            windows[idx] = (f.start_us, f.start_us + at)
-
+        airtimes = {idx: self.cfg.airtime.tx_airtime_us(len(f.payload), f.rate_mbps,
+                                                         not f.broadcast, self._rng)
+                    for idx, f in enumerate(frames)}
         self._prune_in_flight(min((f.start_us for f in frames), default=0))
+        frames = self._carrier_sense(frames, airtimes)
+        windows = {idx: (f.start_us, f.start_us + airtimes[idx]) for idx, f in enumerate(frames)}
 
         outcomes: list[TxOutcome] = []
         for idx, f in enumerate(frames):
-            interferers = self._interferers_for(idx, frames, windows)
+            others = [(g, windows[j]) for j, g in enumerate(frames) if j != idx]
+            others += [(i.frame, (i.frame.start_us, i.end_us)) for i in self._in_flight]
             outcomes.append(self._evaluate_frame(f, airtimes[idx], windows[idx],
-                                                 interferers))
+                                                 _Interference(f.channel, others)))
 
         # Register as in-flight ONLY the frames that actually radiated. Frames
         # rejected before transmission (peer_not_exist / channel_mismatch /
@@ -177,27 +174,28 @@ class MediumEngine:
         """Convenience: process a single frame (no same-slice peers)."""
         return self.process_batch([frame])[0]
 
+    def _carrier_sense(self, frames: list[Frame], airtimes: dict[int, int]) -> list[Frame]:
+        """Delay each frame past any earlier same-channel frame its sender can hear (DCF deferral)."""
+        busy = [(i.frame, i.frame.start_us, i.end_us) for i in self._in_flight]
+        out = list(frames)
+        for idx in sorted(range(len(frames)), key=lambda i: frames[i].start_us):
+            f = frames[idx]
+            start = f.start_us
+            for g, g_start, g_end in sorted(busy, key=lambda b: b[1]):
+                if (g.channel == f.channel and g_start <= start < g_end
+                        and self._hears(f.src_node, g.src_node)):
+                    start = g_end
+            out[idx] = replace(f, start_us=start)
+            busy.append((f, start, start + airtimes[idx]))
+        return out
+
+    def _hears(self, listener: int, talker: int) -> bool:
+        d = self._nodes[listener].distance_to(self._nodes[talker])
+        power = self.cfg.link_budget.rx_power_dbm(self.cfg.propagation, d)
+        return power >= self.cfg.cca_threshold_dbm
+
     def _prune_in_flight(self, now_us: int) -> None:
         self._in_flight = [i for i in self._in_flight if i.end_us > now_us]
-
-    def _interferers_for(self, idx: int, frames: list[Frame],
-                         windows: dict[int, tuple[int, int]]) -> list[Frame]:
-        """Same-channel frames whose window overlaps frame idx's window (D-013)."""
-        f = frames[idx]
-        w = windows[idx]
-        out: list[Frame] = []
-        for j, g in enumerate(frames):
-            if j == idx:
-                continue
-            if g.channel != f.channel:
-                continue
-            if _overlaps(w, windows[j]):
-                out.append(g)
-        for infl in self._in_flight:
-            if infl.frame.channel == f.channel and _overlaps(w, (infl.frame.start_us,
-                                                                 infl.end_us)):
-                out.append(infl.frame)
-        return out
 
     def _rx_power_dbm(self, src: NodeState, dst: NodeState) -> tuple[float, float]:
         d = src.distance_to(dst)
@@ -239,7 +237,7 @@ class MediumEngine:
                          delivery_us)
 
     def _evaluate_frame(self, f: Frame, airtime_us: int,
-                        window: tuple[int, int], interferers: list[Frame]) -> TxOutcome:
+                        window: tuple[int, int], interference: "_Interference") -> TxOutcome:
         src = self._nodes[f.src_node]
 
         # Precondition: Wi-Fi must be started to transmit (brief §3).
@@ -250,8 +248,9 @@ class MediumEngine:
             # Broadcast is unacknowledged, so the whole airtime is the frame (no ACK
             # tail); the data lands at the end of airtime.
             base_delivery = window[0] + airtime_us
-            return self._evaluate_broadcast(f, airtime_us, base_delivery, interferers)
-        return self._evaluate_unicast(f, airtime_us, window, interferers)
+            return self._evaluate_broadcast(f, airtime_us, base_delivery,
+                                            interference.during(window))
+        return self._evaluate_unicast(f, airtime_us, window, interference)
 
     def _evaluate_broadcast(self, f: Frame, airtime_us: int, base_delivery: int,
                             interferers: list[Frame]) -> TxOutcome:
@@ -272,7 +271,7 @@ class MediumEngine:
         return TxOutcome(f, "success", airtime_us, 1, receivers, "broadcast_unacked")
 
     def _evaluate_unicast(self, f: Frame, airtime_us: int,
-                          window: tuple[int, int], interferers: list[Frame]) -> TxOutcome:
+                          window: tuple[int, int], interference: "_Interference") -> TxOutcome:
         dst_id = self.node_id_for_mac(f.dst_mac)
         if dst_id is None:
             return TxOutcome(f, "fail", airtime_us, 0, [], "peer_not_exist")  # brief §3
@@ -302,7 +301,10 @@ class MediumEngine:
             attempts += 1
             # Data lands: elapsed full attempts, minus this attempt's ACK tail.
             delivery = window[0] + total_airtime - ack_tail + prop
-            v = self._reception(f, dst, interferers, delivery)
+            # Each retry goes out after the previous attempt, so it meets different traffic.
+            attempt_start = window[0] + total_airtime - airtime_us
+            v = self._reception(f, dst, interference.during(
+                (attempt_start, attempt_start + airtime_us)), delivery)
             last_v = v
             if v.delivered:
                 return TxOutcome(f, "success", total_airtime, attempts, [v], "acked")
@@ -310,6 +312,17 @@ class MediumEngine:
                 total_airtime += airtime_us  # retransmit costs another airtime
         return TxOutcome(f, "fail", total_airtime, attempts,
                          [last_v] if last_v else [], "lost_on_air")
+
+
+@dataclass(frozen=True)
+class _Interference:
+    """Other transmissions a frame could meet, each with its on-air window."""
+
+    channel: int
+    others: list
+
+    def during(self, window: tuple[int, int]) -> list[Frame]:
+        return [g for g, w in self.others if g.channel == self.channel and _overlaps(window, w)]
 
 
 def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:

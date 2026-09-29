@@ -1,0 +1,19 @@
+# M3: five firmware nodes on a line under the physical SNR->PER model. Node 1 (firmware A)
+# pings; nodes 2-5 (firmware B) reply. Delivery should fall off with distance: the last
+# node sits past the ~200 m emergent range (V-001).
+name: m3_espnow_line
+
+nodes:
+  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0,   0], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [40,  0], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [120, 0], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 4, mac: "aa:bb:cc:00:00:04", pos: [190, 0], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 5, mac: "aa:bb:cc:00:00:05", pos: [260, 0], firmware: ../firmware/examples/espnow_pong/build }
+
+medium:
+  error_model: snr_per
+
+run:
+  duration_us: 6000000
+  slice_us: 250
+  seed: 3
