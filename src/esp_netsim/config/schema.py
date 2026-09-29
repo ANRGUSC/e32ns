@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ..protocol import normalize_mac
-from ..medium import MediumConfig, MediumEngine
+from ..medium import AP_NODE_ID, MediumConfig, MediumEngine
 from ..channel.pathloss import LogDistancePropagationLoss, LinkBudget
 from ..channel.error_model import ConstantErrorModel, SnrPerErrorModel
 from ..channel.airtime import AirtimeModel
@@ -22,6 +23,16 @@ class NodeConfig:
     z: float = 0.0
     channel: int = 1
     firmware: Optional[str] = None   # ESP-IDF build dir; None runs a MockNode
+    wifi: bool = False               # its IP traffic crosses the modeled link to the AP
+
+
+@dataclass(frozen=True)
+class AccessPoint:
+    mac: str
+    x: float
+    y: float
+    channel: int
+    node_id: int = AP_NODE_ID
 
 
 @dataclass(frozen=True)
@@ -76,11 +87,15 @@ class ScenarioConfig:
     out_dir: str = "out"
     port: int = 0
     traffic: tuple = ()
+    ap: Optional[AccessPoint] = None
 
     def build_engine(self) -> MediumEngine:
         engine = MediumEngine(self.medium.build(self.seed))
         for n in self.nodes:
             engine.add_node(n.node_id, n.mac, n.x, n.y, n.z, n.channel)
+        if self.ap:
+            engine.add_node(self.ap.node_id, self.ap.mac, self.ap.x, self.ap.y,
+                            channel=self.ap.channel, espnow=False)
         return engine
 
 
@@ -103,6 +118,8 @@ def parse_scenario(doc: dict, base_dir: str = ".") -> ScenarioConfig:
         ctx = f"nodes[{i}]"
         nid = int(_require(rn, "id", ctx))
         mac = normalize_mac(_require(rn, "mac", ctx))
+        if nid < 1:
+            raise ValueError(f"{ctx}: node ids start at 1 (0 is the access point)")
         if nid in seen_ids:
             raise ValueError(f"{ctx}: duplicate node id {nid}")
         if mac in seen_macs:
@@ -115,7 +132,10 @@ def parse_scenario(doc: dict, base_dir: str = ".") -> ScenarioConfig:
         z = float(pos[2]) if len(pos) > 2 else 0.0
         nodes.append(NodeConfig(node_id=nid, mac=mac, x=float(pos[0]), y=float(pos[1]),
                                 z=z, channel=int(rn.get("channel", 1)),
-                                firmware=_parse_firmware(rn.get("firmware"), base_dir, ctx)))
+                                firmware=_parse_firmware(rn.get("firmware"), base_dir, ctx),
+                                wifi=bool(rn.get("wifi", False))))
+
+    ap = _parse_ap(doc.get("wifi_ap"), nodes)
 
     run = doc.get("run", {})
     name = doc.get("name", "scenario")
@@ -129,6 +149,7 @@ def parse_scenario(doc: dict, base_dir: str = ".") -> ScenarioConfig:
         port=int(run.get("port", 0)),
         traffic=tuple(_parse_traffic(doc.get("traffic", []),
                                      {n.node_id for n in nodes if n.firmware is None})),
+        ap=ap,
     )
 
 
@@ -154,13 +175,35 @@ def _parse_traffic(raw: Any, valid_ids: set) -> list:
     return out
 
 
+def _parse_ap(raw: Optional[dict], nodes: list) -> Optional[AccessPoint]:
+    wifi_nodes = [n for n in nodes if n.wifi]
+    if raw is None:
+        if wifi_nodes:
+            raise ValueError("nodes with wifi: true need a wifi_ap section")
+        return None
+    pos = _require(raw, "pos", "wifi_ap")
+    ap = AccessPoint(mac=normalize_mac(raw.get("mac", "02:00:00:00:00:01")),
+                     x=float(pos[0]), y=float(pos[1]), channel=int(raw.get("channel", 1)))
+    for n in wifi_nodes:
+        if n.firmware is None:
+            raise ValueError(f"node {n.node_id}: wifi needs firmware (mock nodes have no IP stack)")
+        if n.channel != ap.channel:
+            raise ValueError(f"node {n.node_id}: a station must use the AP's channel {ap.channel}")
+    return ap
+
+
 def _parse_firmware(raw: Optional[str], base_dir: str, ctx: str) -> Optional[str]:
     if raw is None:
         return None
     path = os.path.normpath(os.path.join(base_dir, os.path.expanduser(raw)))
-    if not os.path.isfile(os.path.join(path, "flasher_args.json")):
+    args = os.path.join(path, "flasher_args.json")
+    if not os.path.isfile(args):
         raise ValueError(f"{ctx}.firmware: {path} is not an ESP-IDF build dir "
                          "(no flasher_args.json; run idf.py build)")
+    with open(args, encoding="utf-8") as f:
+        chip = json.load(f)["extra_esptool_args"]["chip"]
+    if chip != "esp32s3":
+        raise ValueError(f"{ctx}.firmware: {path} targets {chip}; run idf.py set-target esp32s3")
     if os.name == "nt":
         raise ValueError(f"{ctx}.firmware: QEMU nodes need Linux or WSL (QMP over UNIX sockets)")
     return path

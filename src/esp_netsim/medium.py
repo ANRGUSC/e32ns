@@ -18,6 +18,7 @@ from .channel.error_model import ErrorRateModel, SnrPerErrorModel, ReceptionCont
 from .channel.airtime import AirtimeModel
 
 ESP_NOW_MAX_DATA_LEN = 250  # v1.0; v2.0 is 1470 (needs IDF>=5.4.2)
+AP_NODE_ID = 0              # scenario node ids start at 1
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class NodeState:
     z: float = 0.0
     channel: int = 1
     wifi_started: bool = True   # esp_wifi_start must precede TX (brief §3)
+    espnow: bool = True         # False for the access point, which ignores ESP-NOW
     peers: dict = field(default_factory=dict)  # mac -> PeerInfo
 
     def distance_to(self, other: "NodeState") -> float:
@@ -54,6 +56,7 @@ class Frame:
     seq: int
     payload: bytes
     start_us: int
+    wifi: bool = False          # an infrastructure data frame (payload is an Ethernet frame)
 
     @property
     def broadcast(self) -> bool:
@@ -113,9 +116,9 @@ class MediumEngine:
         self._in_flight: list[_InFlight] = []
 
     def add_node(self, node_id: int, mac: str, x: float = 0.0, y: float = 0.0,
-                 z: float = 0.0, channel: int = 1) -> NodeState:
+                 z: float = 0.0, channel: int = 1, espnow: bool = True) -> NodeState:
         mac = normalize_mac(mac)
-        ns = NodeState(node_id=node_id, mac=mac, x=x, y=y, z=z, channel=channel)
+        ns = NodeState(node_id=node_id, mac=mac, x=x, y=y, z=z, channel=channel, espnow=espnow)
         self._nodes[node_id] = ns
         self._by_mac[mac] = node_id
         return ns
@@ -258,8 +261,8 @@ class MediumEngine:
         for nid, node in self._nodes.items():
             if nid == f.src_node:
                 continue
-            if node.channel != f.channel:
-                continue  # channel mismatch: not received
+            if node.channel != f.channel or not node.espnow:
+                continue
             prop = self.cfg.airtime.propagation_delay_us(
                 self._nodes[f.src_node].distance_to(node))
             v = self._reception(f, node, interferers, base_delivery + prop)

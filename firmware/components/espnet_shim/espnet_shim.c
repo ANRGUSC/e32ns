@@ -71,6 +71,9 @@ static uint8_t s_seq_dst[SEQ_RING][6];
 static esp_now_send_cb_t s_send_cb;
 static esp_now_recv_cb_t s_recv_cb;
 static EventGroupHandle_t s_eg;
+static esp_netif_t *s_netif;
+static esp_eth_handle_t s_eth;
+static bool s_eth_started;
 static StaticEventGroup_t s_eg_mem;
 static StackType_t s_rx_stack[4096];
 static StaticTask_t s_rx_task;
@@ -101,10 +104,15 @@ static void load_identity(void) {
 
 static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data) {
     xEventGroupSetBits(s_eg, BIT0);
+    /* Station apps wait for Wi-Fi events; the open_eth NIC stands in for the station. */
+    wifi_event_sta_connected_t connected = { .channel = s_id.channel };
+    esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &connected, sizeof connected, 0);
+    esp_event_post(IP_EVENT, IP_EVENT_STA_GOT_IP, data, sizeof(ip_event_got_ip_t), 0);
 }
 
-/* The medium is reached over QEMU's open_eth NIC and slirp NAT, not over the radio. */
-static void ethernet_up(void) {
+/* ESP-NOW control traffic and Wi-Fi traffic both ride QEMU's open_eth NIC (D-028, D-030). */
+static void ethernet_init(void) {
+    if (s_netif) return;
     esp_err_t err = esp_netif_init();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(err);
     err = esp_event_loop_create_default();
@@ -112,18 +120,23 @@ static void ethernet_up(void) {
 
     s_eg = xEventGroupCreateStatic(&s_eg_mem);
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
-    esp_netif_t *netif = esp_netif_new(&netif_cfg);
+    s_netif = esp_netif_new(&netif_cfg);
     eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_cfg = ETH_PHY_DEFAULT_CONFIG();
     phy_cfg.autonego_timeout_ms = 100;
     esp_eth_config_t cfg = ETH_DEFAULT_CONFIG(esp_eth_mac_new_openeth(&mac_cfg),
                                               esp_eth_phy_new_dp83848(&phy_cfg));
-    esp_eth_handle_t eth = NULL;
-    ESP_ERROR_CHECK(esp_eth_driver_install(&cfg, &eth));
-    ESP_ERROR_CHECK(esp_netif_attach(netif, esp_eth_new_netif_glue(eth)));
+    ESP_ERROR_CHECK(esp_eth_driver_install(&cfg, &s_eth));
+    ESP_ERROR_CHECK(esp_netif_attach(s_netif, esp_eth_new_netif_glue(s_eth)));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_got_ip, NULL));
-    ESP_ERROR_CHECK(esp_eth_start(eth));
-    xEventGroupWaitBits(s_eg, BIT0, pdFALSE, pdTRUE, portMAX_DELAY);
+}
+
+static void ethernet_start(void) {
+    ethernet_init();
+    if (!s_eth_started) {
+        ESP_ERROR_CHECK(esp_eth_start(s_eth));
+        s_eth_started = true;
+    }
 }
 
 static void connect_medium(void) {
@@ -177,7 +190,8 @@ static void reader_task(void *arg) {
 
 esp_err_t __wrap_esp_now_init(void) {
     load_identity();
-    ethernet_up();
+    ethernet_start();
+    xEventGroupWaitBits(s_eg, BIT0, pdFALSE, pdTRUE, portMAX_DELAY);
     connect_medium();
     ESP_LOGI(TAG, "node %u " MACSTR " ch %u on medium port %u",
              s_id.node_id, MAC2STR(s_id.mac), s_id.channel, s_id.port);
@@ -226,9 +240,24 @@ esp_err_t __wrap_esp_now_send(const uint8_t *peer_addr, const uint8_t *data, siz
     return ESP_OK;
 }
 
-/* No radio under QEMU: Wi-Fi bring-up succeeds, and the scenario's channel is authoritative. */
+/* No radio under QEMU: the station is the open_eth NIC, whose frames the host medium carries
+ * over the modeled AP link. The scenario's channel is authoritative. */
 esp_err_t __wrap_esp_wifi_init(const wifi_init_config_t *config) { return ESP_OK; }
 esp_err_t __wrap_esp_wifi_set_storage(wifi_storage_t storage) { return ESP_OK; }
 esp_err_t __wrap_esp_wifi_set_mode(wifi_mode_t mode) { return ESP_OK; }
-esp_err_t __wrap_esp_wifi_start(void) { return ESP_OK; }
 esp_err_t __wrap_esp_wifi_set_channel(uint8_t primary, wifi_second_chan_t second) { return ESP_OK; }
+esp_err_t __wrap_esp_wifi_set_config(wifi_interface_t iface, wifi_config_t *conf) { return ESP_OK; }
+
+esp_err_t __wrap_esp_wifi_start(void) {
+    return esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_START, NULL, 0, portMAX_DELAY);
+}
+
+esp_err_t __wrap_esp_wifi_connect(void) {
+    ethernet_start();
+    return ESP_OK;
+}
+
+esp_netif_t *__wrap_esp_netif_create_default_wifi_sta(void) {
+    ethernet_init();
+    return s_netif;
+}

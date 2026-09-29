@@ -6,6 +6,7 @@ import struct
 from typing import BinaryIO, Optional
 
 from . import radiotap
+from ..medium import AP_NODE_ID, Frame
 
 LINKTYPE_IEEE802_11_RADIOTAP = 127
 
@@ -74,20 +75,9 @@ class PcapngWriter:
         body += _option(_OPT_ENDOFOPT, b"")
         self._fp.write(_block(_BT_EPB, body))
 
-    def write_espnow(self, ts_us: int, src_mac: str, dst_mac: str, payload: bytes,
-                     channel: int, rate_mbps: float, rssi_dbm: float,
-                     seq: int = 0, comment: Optional[str] = None) -> None:
-        data = radiotap.build_frame(src_mac, dst_mac, payload, channel, rate_mbps,
-                                    rssi_dbm, seq)
-        self.write_packet(ts_us, data, comment)
-
 
 class TraceRecorder:
-    """Adapts medium TxOutcome objects into pcapng packets (delivered + dropped).
-
-    Wire this as a Simulation outcome hook: every transmission (and each receiver's
-    verdict) is written with a comment carrying the medium internals (D-016).
-    """
+    """Writes every medium verdict as a pcapng packet whose comment carries the medium's reasoning."""
 
     def __init__(self, writer: PcapngWriter):
         self._w = writer
@@ -98,14 +88,20 @@ class TraceRecorder:
                         f"airtime_us={outcome.airtime_us}")
         if not outcome.receivers:
             # e.g. peer_not_exist / channel_mismatch: record the attempt itself.
-            self._w.write_espnow(f.start_us + outcome.airtime_us, f.src_mac, f.dst_mac,
-                                 f.payload, f.channel, f.rate_mbps, -100.0, f.seq,
-                                 comment=base_comment + f" reason={outcome.reason}")
+            self._w.write_packet(f.start_us + outcome.airtime_us, _packet(f, -100.0),
+                                 base_comment + f" reason={outcome.reason}")
             return
         for r in outcome.receivers:
             comment = (base_comment +
                        f" rx_node={r.node_id} delivered={r.delivered} "
                        f"snr_db={r.snr_db:.2f} per={r.per:.3e} reason={r.reason}")
-            self._w.write_espnow(r.delivery_us, f.src_mac, f.dst_mac, f.payload,
-                                 f.channel, f.rate_mbps, r.rssi_dbm, f.seq,
-                                 comment=comment)
+            self._w.write_packet(r.delivery_us, _packet(f, r.rssi_dbm), comment)
+
+
+def _packet(f: Frame, rssi_dbm: float) -> bytes:
+    if f.wifi:
+        return (radiotap.build_radiotap(f.rate_mbps, f.channel, rssi_dbm)
+                + radiotap.build_dot11_data(f.src_mac, f.dst_mac, f.src_node != AP_NODE_ID,
+                                            f.payload, f.seq))
+    return radiotap.build_frame(f.src_mac, f.dst_mac, f.payload, f.channel, f.rate_mbps,
+                                rssi_dbm, f.seq)

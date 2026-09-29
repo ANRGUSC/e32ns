@@ -1,0 +1,19 @@
+# M4: three stations (firmware C) try to join the virtual AP and fetch http://example.com from
+# the real Internet. Every frame crosses the modeled station-AP link: the near station is clean,
+# the edge station needs MAC retries, and the far one never gets a DHCP lease.
+name: m4_wifi_gateway
+
+wifi_ap: { pos: [0, 0], channel: 6 }
+
+nodes:
+  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [10, 0],  channel: 6, wifi: true, firmware: ../firmware/examples/wifi_http/build }
+  - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [160, 0], channel: 6, wifi: true, firmware: ../firmware/examples/wifi_http/build }
+  - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [0, 230], channel: 6, wifi: true, firmware: ../firmware/examples/wifi_http/build }
+
+medium:
+  error_model: snr_per
+
+run:
+  duration_us: 10000000
+  slice_us: 250
+  seed: 4

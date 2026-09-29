@@ -6,6 +6,7 @@ import struct
 import pytest
 
 from esp_netsim.config.schema import parse_scenario, load_scenario
+from esp_netsim.orchestrator.wifi_link import is_medium_control
 from esp_netsim.trace.pcapng import PcapngWriter, LINKTYPE_IEEE802_11_RADIOTAP
 from esp_netsim.trace import radiotap
 
@@ -110,10 +111,9 @@ def _read_blocks(buf: bytes):
 def test_pcapng_structure_and_comment():
     buf = io.BytesIO()
     w = PcapngWriter(buf, interface_name="test-if")
-    w.write_espnow(ts_us=1234567, src_mac="aa:bb:cc:00:00:01",
-                   dst_mac="ff:ff:ff:ff:ff:ff", payload=b"hello",
-                   channel=6, rate_mbps=1.0, rssi_dbm=-60.0, seq=1,
-                   comment="reason=ok snr_db=25.00")
+    w.write_packet(1234567, radiotap.build_frame("aa:bb:cc:00:00:01", "ff:ff:ff:ff:ff:ff",
+                                                 b"hello", 6, 1.0, -60.0, 1),
+                   "reason=ok snr_db=25.00")
     data = buf.getvalue()
     blocks = _read_blocks(data)
     types = [b[0] for b in blocks]
@@ -134,3 +134,25 @@ def test_pcapng_structure_and_comment():
 
     # Every block total length is a multiple of 4 (32-bit alignment).
     assert all(total % 4 == 0 for _t, total, _b in blocks)
+
+
+def _tcp_frame(src_ip: bytes, dst_ip: bytes, sport: int, dport: int) -> bytes:
+    eth = bytes(12) + b"\x08\x00"
+    ip = bytes([0x45, 0]) + bytes(7) + bytes([6]) + bytes(2) + src_ip + dst_ip
+    return eth + ip + struct.pack(">HH", sport, dport) + bytes(16)
+
+
+def test_medium_control_link_bypasses_the_wifi_model():
+    guest, host, web = bytes((10, 0, 2, 15)), bytes((10, 0, 2, 2)), bytes((93, 184, 215, 14))
+    assert is_medium_control(_tcp_frame(guest, host, 40000, 52333), 52333)
+    assert is_medium_control(_tcp_frame(host, guest, 52333, 40000), 52333)
+    assert not is_medium_control(_tcp_frame(guest, web, 40000, 80), 52333)
+    assert not is_medium_control(_tcp_frame(guest, host, 40000, 8080), 52333)
+
+
+def test_wifi_data_frame_carries_the_ip_packet():
+    eth = bytes(range(6)) + bytes(range(6, 12)) + b"\x08\x00" + b"IPDATA"
+    frame = radiotap.build_dot11_data("aa:bb:cc:00:00:01", "02:00:00:00:00:01", True, eth)
+    assert frame[:2] == b"\x08\x01"                          # data frame, ToDS
+    assert frame[24:] == b"\xaa\xaa\x03\x00\x00\x00\x08\x00IPDATA"
+

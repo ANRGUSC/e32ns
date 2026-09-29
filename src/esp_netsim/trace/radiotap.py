@@ -78,3 +78,17 @@ def build_frame(src_mac: str, dst_mac: str, payload: bytes, channel: int,
     """radiotap header + synthesized 802.11 action frame (the pcapng packet data)."""
     return (build_radiotap(rate_mbps, channel, rssi_dbm)
             + build_dot11_action(src_mac, dst_mac, payload, seq))
+
+
+def build_dot11_data(src_mac: str, dst_mac: str, to_ds: bool, eth_frame: bytes,
+                     seq: int = 0) -> bytes:
+    """An 802.11 data frame between a station and its AP carrying an Ethernet frame's payload."""
+    ethertype, body = eth_frame[12:14], eth_frame[14:]
+    flags = 0x01 if to_ds else 0x02   # ToDS: station to AP; FromDS: AP to station
+    a1 = bytes.fromhex(normalize_mac(dst_mac).replace(":", ""))
+    a2 = bytes.fromhex(normalize_mac(src_mac).replace(":", ""))
+    a3 = eth_frame[0:6] if to_ds else eth_frame[6:12]   # final destination / original source
+    seq_ctrl = struct.pack("<H", (seq & 0x0FFF) << 4)
+    header = struct.pack("<BBH", 0x08, flags, 0) + a1 + a2 + a3 + seq_ctrl
+    llc_snap = b"\xaa\xaa\x03\x00\x00\x00" + ethertype
+    return header + llc_snap + body

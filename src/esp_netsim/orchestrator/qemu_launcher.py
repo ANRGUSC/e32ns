@@ -22,6 +22,8 @@ from ..config.schema import NodeConfig
 
 FLASH_SIZE = 4 * 1024 * 1024
 PARTITION_ENTRY = struct.Struct("<2sBBII16sI")
+# filter-redirector chardevs: guest->medium, medium->slirp, slirp->medium, medium->guest.
+WIFI_SOCKETS = ("up_out", "up_in", "dn_out", "dn_in")
 NVS_TYPE, NVS_SUBTYPE = 1, 2
 
 
@@ -63,6 +65,7 @@ class QemuNode:
     proc: asyncio.subprocess.Process
     qmp: QmpClient
     uart_log: Path
+    wifi_sockets: dict   # WIFI_SOCKETS name -> path; empty unless the node is a Wi-Fi station
 
 
 def find_qemu() -> str:
@@ -113,10 +116,10 @@ async def launch(node: NodeConfig, port: int, workdir: Path) -> QemuNode:
     flash, qmp_sock, log_path = (workdir / f"node{node.node_id}.{ext}"
                                  for ext in ("bin", "qmp", "log"))
     flash.write_bytes(flash_image(node, port))
+    sockets = {k: workdir / f"node{node.node_id}.{k}" for k in WIFI_SOCKETS} if node.wifi else {}
     proc = await asyncio.create_subprocess_exec(
         find_qemu(), "-machine", "esp32s3", "-no-reboot", "-S", "-display", "none",
-        "-monitor", "none", "-serial", f"file:{log_path}",
-        "-nic", "user,model=open_eth",
+        "-monitor", "none", "-serial", f"file:{log_path}", *_nic_args(sockets),
         "-drive", f"file={flash},if=mtd,format=raw",
         "-qmp", f"unix:{qmp_sock},server=on,wait=off",
         stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
@@ -124,11 +127,23 @@ async def launch(node: NodeConfig, port: int, workdir: Path) -> QemuNode:
     for _ in range(200):
         try:
             return QemuNode(node.node_id, proc, await QmpClient.connect_unix(str(qmp_sock)),
-                            log_path)
+                            log_path, sockets)
         except (FileNotFoundError, ConnectionRefusedError):
             await asyncio.sleep(0.05)
     proc.kill()
     raise RuntimeError(f"node {node.node_id}: QEMU did not open QMP")
+
+
+def _nic_args(wifi_sockets: dict) -> list[str]:
+    """open_eth behind slirp NAT; for a Wi-Fi station every frame detours through the medium."""
+    args = ["-netdev", "user,id=n0", "-net", "nic,netdev=n0,model=open_eth"]
+    for name, path in wifi_sockets.items():
+        args += ["-chardev", f"socket,id={name},path={path},server=on,wait=off"]
+    if wifi_sockets:
+        # queue=rx holds frames the guest sends toward slirp; queue=tx, frames slirp sends back.
+        args += ["-object", "filter-redirector,id=up,netdev=n0,queue=rx,outdev=up_out,indev=up_in",
+                 "-object", "filter-redirector,id=dn,netdev=n0,queue=tx,outdev=dn_out,indev=dn_in"]
+    return args
 
 
 async def terminate(nodes: list[QemuNode]) -> None:
