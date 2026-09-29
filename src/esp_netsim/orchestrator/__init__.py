@@ -1,1 +1,1 @@
-"""Node gates + SliceTime barrier clock (D-004)."""
+"""Barrier clock, scenario runner, QEMU launcher and Wi-Fi bridge."""

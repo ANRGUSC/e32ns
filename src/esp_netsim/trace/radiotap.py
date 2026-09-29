@@ -1,7 +1,5 @@
-"""Radiotap header + ESP-NOW-shaped 802.11 vendor action frame for Wireshark captures (D-016).
-
-A faithful frame *shape*, not a byte-exact ESP-NOW vendor element. Little-endian.
-"""
+"""Radiotap + 802.11 frames for Wireshark: ESP-NOW as a vendor action frame (its shape, not
+its exact bytes) and Wi-Fi as data frames (D-016)."""
 
 from __future__ import annotations
 
@@ -29,15 +27,7 @@ def channel_to_freq_mhz(channel: int) -> int:
 
 
 def build_radiotap(rate_mbps: float, channel: int, rssi_dbm: float) -> bytes:
-    """Build a radiotap header for Flags/Rate/Channel/dBm-antenna-signal.
-
-    Field layout (after the 8-byte it_ header), honoring radiotap alignment:
-      off 8  Flags (u8)
-      off 9  Rate  (u8, 500 kbps units)
-      off 10 Channel: freq u16, flags u16  (2-byte aligned; already even)
-      off 14 dBm Antenna Signal (s8)
-    Total length = 15 bytes.
-    """
+    """A 15-byte radiotap header: flags, rate, channel, and dBm antenna signal."""
     flags = 0x00
     rate = int(round(rate_mbps * 2))  # 500 kbps units: 1 Mbps -> 2
     freq = channel_to_freq_mhz(channel)
@@ -55,11 +45,7 @@ def build_radiotap(rate_mbps: float, channel: int, rssi_dbm: float) -> bytes:
 
 def build_dot11_action(src_mac: str, dst_mac: str, payload: bytes,
                        seq: int = 0) -> bytes:
-    """Synthesize an 802.11 vendor-specific action frame carrying `payload`.
-
-    Frame Control: type=Management(0), subtype=Action(13) -> 0xD0, flags 0x00.
-    Body: category=127 (vendor-specific) + Espressif OUI + payload.
-    """
+    """An 802.11 vendor-specific action frame (Espressif OUI) carrying `payload`."""
     frame_control = struct.pack("<BB", 0xD0, 0x00)
     duration = struct.pack("<H", 0)
     a1 = bytes.fromhex(normalize_mac(dst_mac).replace(":", ""))  # receiver

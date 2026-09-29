@@ -45,14 +45,9 @@ class Connection:
 
 
 class MediumServer:
-    """TCP server that accepts node connections and routes messages.
+    """Loopback TCP server: hands every inbound message to the handler and sends to nodes by id."""
 
-    The orchestrator supplies an async `handler(node_id, msg, conn)` called for
-    every inbound message. `send(node_id, msg)` delivers to a specific node.
-    """
-
-    def __init__(self, host: str = "127.0.0.1", port: int = 52333):
-        self.host = host
+    def __init__(self, port: int):
         self.port = port
         self._server: Optional[asyncio.AbstractServer] = None
         self._conns: dict[int, Connection] = {}
@@ -71,7 +66,7 @@ class MediumServer:
         return self._server.sockets[0].getsockname()[1]
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._on_client, self.host, self.port)
+        self._server = await asyncio.start_server(self._on_client, "127.0.0.1", self.port)
 
     async def _on_client(self, reader, writer) -> None:
         conn = Connection(reader, writer)

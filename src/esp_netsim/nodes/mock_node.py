@@ -31,15 +31,14 @@ class ReceivedFrame:
 
 
 class MockNode:
-    def __init__(self, node_id: int, mac: str, host: str = "127.0.0.1",
-                 port: int = 52333, channel: int = 1, barrier_ack: bool = True):
+    def __init__(self, node_id: int, mac: str, port: int, channel: int = 1,
+                 barrier_ack: bool = True):
         self.node_id = node_id
         self.mac = protocol.normalize_mac(mac)
-        self.host = host
         self.port = port
         self.channel = channel
         # When False, the node ignores RUN_SLICE and does not send SLICE_DONE — used to
-        # model a QEMU node that is gated externally via QMP instead (D-026).
+        # stand in for a QEMU node, which is paused and resumed over QMP instead.
         self.barrier_ack = barrier_ack
 
         self._reader: Optional[asyncio.StreamReader] = None
@@ -66,7 +65,7 @@ class MockNode:
 
     # ---- connection ---------------------------------------------------------
     async def connect(self) -> None:
-        self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+        self._reader, self._writer = await asyncio.open_connection("127.0.0.1", self.port)
         self._reader_task = asyncio.create_task(self._read_loop())
         await self._send(protocol.hello(self.node_id, self.mac))
         await asyncio.wait_for(self._welcomed.wait(), timeout=5.0)
@@ -119,11 +118,7 @@ class MockNode:
                 tx.sent = True
 
     async def _run_slice(self, until_t: int) -> None:
-        """Emit due transmissions, then ack the barrier (D-004).
-
-        A node with ``barrier_ack=False`` (a QEMU stand-in gated externally via QMP)
-        ignores RUN_SLICE entirely — it neither emits here nor acks (D-026).
-        """
+        """Emit due transmissions, then ack the barrier (a QEMU stand-in does neither)."""
         if not self.barrier_ack:
             return
         await self.emit_due(until_t)

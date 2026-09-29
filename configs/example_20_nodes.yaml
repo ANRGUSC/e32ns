@@ -1,0 +1,36 @@
+# The project brief's example workflow: 20 virtual ESP32-S3 nodes on a 4 x 5 grid, 100 m apart.
+# Firmware A (ping) on nodes 1-10, firmware B (pong) on 11-18, and firmware C on 19-20,
+# which join the AP and reach the real Internet. ESP-NOW connectivity follows from range.
+name: example_20_nodes
+
+wifi_ap: { pos: [150, 350], channel: 1 }
+
+nodes:
+  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0, 0], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [100, 0], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [200, 0], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 4, mac: "aa:bb:cc:00:00:04", pos: [300, 0], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 5, mac: "aa:bb:cc:00:00:05", pos: [0, 100], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 6, mac: "aa:bb:cc:00:00:06", pos: [100, 100], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 7, mac: "aa:bb:cc:00:00:07", pos: [200, 100], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 8, mac: "aa:bb:cc:00:00:08", pos: [300, 100], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 9, mac: "aa:bb:cc:00:00:09", pos: [0, 200], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 10, mac: "aa:bb:cc:00:00:0a", pos: [100, 200], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 11, mac: "aa:bb:cc:00:00:0b", pos: [200, 200], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 12, mac: "aa:bb:cc:00:00:0c", pos: [300, 200], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 13, mac: "aa:bb:cc:00:00:0d", pos: [0, 300], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 14, mac: "aa:bb:cc:00:00:0e", pos: [100, 300], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 15, mac: "aa:bb:cc:00:00:0f", pos: [200, 300], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 16, mac: "aa:bb:cc:00:00:10", pos: [300, 300], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 17, mac: "aa:bb:cc:00:00:11", pos: [0, 400], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 18, mac: "aa:bb:cc:00:00:12", pos: [100, 400], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 19, mac: "aa:bb:cc:00:00:13", pos: [200, 400], wifi: true, firmware: ../firmware/examples/wifi_http/build }
+  - { id: 20, mac: "aa:bb:cc:00:00:14", pos: [300, 400], wifi: true, firmware: ../firmware/examples/wifi_http/build }
+
+medium:
+  error_model: snr_per
+
+run:
+  duration_us: 5000000
+  slice_us: 250
+  seed: 20

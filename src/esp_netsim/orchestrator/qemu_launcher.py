@@ -1,8 +1,4 @@
-"""Boot firmware nodes under the Espressif QEMU fork, each with its own identity, gated over QMP.
-
-QMP must ride a UNIX socket, never TCP: TCP QMP stalls ~88 ms/cycle on delayed-ACK vs
-~0.75 ms over a UNIX socket (V-007).
-"""
+"""Boot firmware nodes under the Espressif QEMU fork, each with its own identity, gated over QMP."""
 
 from __future__ import annotations
 
@@ -32,6 +28,7 @@ class QmpClient:
         self._r = reader
         self._w = writer
 
+    # QMP over TCP stalls ~88 ms per command on delayed ACK; a UNIX socket takes ~0.75 ms (V-007).
     @classmethod
     async def connect_unix(cls, path: str) -> "QmpClient":
         reader, writer = await asyncio.open_unix_connection(path)

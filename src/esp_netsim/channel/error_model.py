@@ -1,8 +1,4 @@
-"""SNR/geometry -> packet error rate (D-007).
-
-SnrPerErrorModel uses the standard digital-comms BER formulas ns-3's YansErrorRateModel
-is built on; it is validated for invariants and reference points, not bit-exact ns-3 parity.
-"""
+"""SNR -> packet error rate, from the BER formulas ns-3's YansErrorRateModel uses (D-007)."""
 
 from __future__ import annotations
 

@@ -1,8 +1,4 @@
-"""RadioMedium engine: geometry + physics + ESP-NOW send/recv semantics (D-009/D-012/D-013).
-
-Pure and deterministic given (config, seed, submitted frames); no I/O. The orchestrator
-drives it and the transport carries the results.
-"""
+"""Wireless medium: geometry, carrier sense, collisions and ESP-NOW semantics, with no I/O (D-012)."""
 
 from __future__ import annotations
 
@@ -100,7 +96,7 @@ class MediumConfig:
     bandwidth_hz: float = 22_000_000.0  # DSSS channel width (brief §5)
     capture_threshold_db: float = 4.0   # min SINR to capture a frame (brief §3/§5)
     cca_threshold_dbm: float = -82.0    # 802.11 preamble-detect level: at or above, a sender defers
-    max_retries: int = 3                # unicast MAC retransmissions (brief §3, D-012)
+    max_retries: int = 3                # unicast MAC retransmissions (brief §3)
     max_data_len: int = ESP_NOW_MAX_DATA_LEN
     seed: int = 0
 
@@ -110,7 +106,7 @@ class MediumEngine:
 
     def __init__(self, config: Optional[MediumConfig] = None):
         self.cfg = config or MediumConfig()
-        self._rng = random.Random(self.cfg.seed)  # single seeded RNG (D-011)
+        self._rng = random.Random(self.cfg.seed)  # one RNG makes a seeded run reproducible
         self._nodes: dict[int, NodeState] = {}
         self._by_mac: dict[str, int] = {}
         self._in_flight: list[_InFlight] = []
@@ -144,12 +140,7 @@ class MediumEngine:
         return self._by_mac.get(normalize_mac(mac))
 
     def process_batch(self, frames: list[Frame]) -> list[TxOutcome]:
-        """Evaluate a set of frames offered around the same virtual time.
-
-        Frames in the batch interfere with one another and with still-in-flight
-        frames from earlier slices (D-013). Returns one TxOutcome per frame,
-        in input order.
-        """
+        """Verdicts, in input order, for one slice's frames contending with each other and in-flight ones."""
         airtimes = {idx: self.cfg.airtime.tx_airtime_us(len(f.payload), f.rate_mbps,
                                                          not f.broadcast, self._rng)
                     for idx, f in enumerate(frames)}
@@ -270,7 +261,7 @@ class MediumEngine:
                 receivers.append(v)
             else:
                 receivers.append(v)  # keep for tracing (delivered=False)
-        # Broadcast: unacknowledged -> success once transmitted (brief §3, D-012).
+        # Broadcast is unacknowledged, so the send callback reports success once on the air.
         return TxOutcome(f, "success", airtime_us, 1, receivers, "broadcast_unacked")
 
     def _evaluate_unicast(self, f: Frame, airtime_us: int,
@@ -283,7 +274,7 @@ class MediumEngine:
             return TxOutcome(f, "fail", airtime_us, 0, [], "channel_mismatch")  # brief §3
 
         # Encrypted unicast requires the receiver to have the sender as a peer with LMK
-        # (policy-level model, D-012). We check the *destination* has a peer entry for src.
+        # (policy-level model). We check the *destination* has a peer entry for src.
         src = self._nodes[f.src_node]
         src_peer = src.peers.get(dst.mac)
         if src_peer and src_peer.encrypt:
@@ -291,7 +282,7 @@ class MediumEngine:
             if dst_peer is None or dst_peer.lmk != src_peer.lmk:
                 return TxOutcome(f, "fail", airtime_us, 0, [], "encrypt_no_matching_lmk")
 
-        # Retry loop: each attempt redraws loss and costs airtime (brief §3, D-012).
+        # Retry loop: each attempt redraws loss and costs airtime (brief §3).
         # The DATA frame lands `ack_tail` (SIFS+ACK) before the attempt's airtime ends,
         # so the receiver's RX time excludes the ACK tail (review BUG-3); the sender's
         # send-cb (status_t) fires after the ACK, i.e. at full airtime.

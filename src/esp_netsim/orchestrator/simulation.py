@@ -44,13 +44,13 @@ class Simulation:
     def __init__(self, engine: MediumEngine, slice_us: int = 1000, port: int = 0):
         self.engine = engine
         self.slice_us = slice_us
-        self.server = MediumServer("127.0.0.1", port)
+        self.server = MediumServer(port)
         self.server.set_handler(self._on_message)
         self.stats = SimStats()
         self.outcome_hooks: list[OutcomeHook] = []
         self.now_us = 0
         # QEMU nodes are paused/resumed over QMP; every other connected node is a mock
-        # driven by RUN_SLICE/SLICE_DONE (D-026).
+        # driven by RUN_SLICE/SLICE_DONE.
         self.qemu_nodes: dict[int, object] = {}
 
         self._slice_frames: list[Frame] = []
@@ -114,7 +114,7 @@ class Simulation:
                     self._barrier.set()
 
     def _start_time(self, msg: Message) -> int:
-        # Guest esp_timers drift from host time and from each other under stop/cont (V-010),
+        # Guest esp_timers drift from host time and from each other under stop/cont,
         # so a QEMU frame is placed at the start of the slice it arrived in; mocks are exact.
         return self.now_us if msg.node in self.qemu_nodes else msg.get("t", self.now_us)
 
@@ -154,7 +154,7 @@ class Simulation:
         resumed = await asyncio.gather(*(_timed(q.cont()) for q in self.qemu_nodes.values()))
         await asyncio.sleep(wall_s)
         paused = await asyncio.gather(*(_timed(q.stop()) for q in self.qemu_nodes.values()))
-        # Without -icount the guest clock is the host clock while running (V-006); QEMU applies
+        # Without -icount the guest clock follows the host clock while running; QEMU applies
         # cont and stop just before replying, so each node ran from one reply to the other.
         return round(sum(p - r for p, r in zip(paused, resumed)) / len(paused) * 1e6)
 
