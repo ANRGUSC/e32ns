@@ -13,6 +13,7 @@ from ..config.schema import ScenarioConfig
 from ..medium import TxOutcome
 from ..nodes.mock_node import MockNode
 from ..trace.pcapng import PcapngWriter, TraceRecorder
+from ..trace.report import write_report
 from . import qemu_launcher, wifi_link
 from .simulation import Simulation, SimStats
 
@@ -110,4 +111,5 @@ async def run_scenario(scenario: ScenarioConfig) -> RunResult:
         stats = await _run_nodes(scenario, sim, out)
     result = RunResult(stats, out, events)
     write_results(scenario, result)
+    write_report(out)
     return result

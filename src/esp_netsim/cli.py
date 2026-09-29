@@ -41,6 +41,7 @@ def _cmd_run(args) -> int:
         kind = "qemu" if n.firmware else "mock"
         print(f"  node {n.node_id} ({kind}, {n.mac}): sent {sent}, received {got}")
     print(f"results        : {result.out_dir}/ (trace.pcapng, results.json, node logs)")
+    print(f"replay         : {result.out_dir / 'report.html'}")
     return 0
 
 

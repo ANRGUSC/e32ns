@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>esp-netsim run</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #d9d9d4;
+  --ok: #1f8a4c; --lost: #c8372d; --node: #2d5fa8; --ap: #8a5a00; --code: #f0f0ec;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151514; --panel: #1e1e1c; --ink: #ecece8; --muted: #9a9a93; --line: #3a3a36;
+          --ok: #4cc27f; --lost: #ef6a5f; --node: #7aa7ec; --ap: #e0b050; --code: #262624; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { margin: 0; font-size: 17px; }
+header p { margin: 2px 0 0; color: var(--muted); }
+main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 12px; padding: 12px 16px; }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; min-width: 0; }
+h2 { margin: 0 0 8px; font-size: 14px; }
+svg { width: 100%; height: auto; display: block; }
+.controls { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.controls input[type=range] { flex: 1; min-width: 120px; }
+button, select { font: inherit; padding: 3px 10px; border: 1px solid var(--line); border-radius: 4px;
+                 background: var(--bg); color: var(--ink); cursor: pointer; }
+#clock { font-variant-numeric: tabular-nums; min-width: 88px; }
+#packets { margin: 8px 0 0; padding: 0; list-style: none; font: 12px/1.5 ui-monospace, Consolas, monospace;
+           height: 150px; overflow: auto; }
+#packets .lost { color: var(--lost); }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
+.tabs button[aria-selected=true] { background: var(--node); border-color: var(--node); color: var(--panel); }
+pre { margin: 0; height: 460px; overflow: auto; background: var(--code); padding: 8px; border-radius: 4px;
+      font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-all; }
+.legend { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.legend b.ok { color: var(--ok); } .legend b.lost { color: var(--lost); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <p id="subtitle"></p>
+</header>
+<main>
+  <section>
+    <h2>Nodes, links and packets</h2>
+    <svg id="map" role="img" aria-label="Node map with packet activity"></svg>
+    <div class="controls">
+      <button id="play">Play</button>
+      <input id="scrub" type="range" min="0" step="1" aria-label="Virtual time">
+      <span id="clock"></span>
+      <select id="speed" aria-label="Playback speed">
+        <option value="0.05">0.05x</option><option value="0.2" selected>0.2x</option><option value="1">1x</option>
+      </select>
+    </div>
+    <div class="legend">Line colour is the link's delivery ratio over the whole run.
+      A flash is one frame on the air: <b class="ok">delivered</b> or <b class="lost">lost</b>.</div>
+    <ul id="packets" aria-label="Packets up to the current time"></ul>
+  </section>
+  <section>
+    <h2>Node console</h2>
+    <div class="tabs" id="tabs" role="tablist"></div>
+    <pre id="console"></pre>
+  </section>
+</main>
+<script>
+const RUN = /*DATA*/null;
+const SVG = "http://www.w3.org/2000/svg";
+const FLASH_US = 40000;
+const byId = Object.fromEntries(RUN.nodes.map(n => [n.id, n]));
+const events = RUN.events.filter(e => e.rx !== null).sort((a, b) => a.t_us - b.t_us);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+document.getElementById("title").textContent = RUN.name;
+document.getElementById("subtitle").textContent =
+  `${RUN.nodes.length} nodes, ${(RUN.duration_us / 1e6).toFixed(1)} s of virtual time, ` +
+  `${RUN.stats.tx_total} transmissions, ${RUN.stats.rx_delivered} receptions delivered, ` +
+  `${RUN.stats.rx_dropped} lost`;
+
+const map = document.getElementById("map");
+const xs = RUN.nodes.map(n => n.pos[0]), ys = RUN.nodes.map(n => n.pos[1]);
+const pad = 40, W = 640;
+const spanX = Math.max(...xs) - Math.min(...xs) || 1, spanY = Math.max(...ys) - Math.min(...ys) || 1;
+const k = Math.min((W - 2 * pad) / spanX, 360 / spanY);
+const H = Math.max(220, spanY * k + 2 * pad);
+map.setAttribute("viewBox", `0 0 ${W} ${H}`);
+const px = n => [pad + (n.pos[0] - Math.min(...xs)) * k + (W - 2 * pad - spanX * k) / 2,
+                 pad + (n.pos[1] - Math.min(...ys)) * k];
+
+// Links bow sideways by their length so links along one line of nodes do not hide each other.
+function arc(a, b) {
+  const [x1, y1] = px(a), [x2, y2] = px(b);
+  const bow = 0.18, [lo, hi] = a.id < b.id ? [1, 1] : [-1, -1];
+  const cx = (x1 + x2) / 2 - (y2 - y1) * bow * lo, cy = (y1 + y2) / 2 + (x2 - x1) * bow * hi;
+  return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
+}
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(SVG, tag);
+  for (const [a, v] of Object.entries(attrs)) e.setAttribute(a, v);
+  parent.appendChild(e);
+  return e;
+}
+
+const links = {};
+for (const e of events) {
+  const key = [Math.min(e.src, e.rx), Math.max(e.src, e.rx)].join("-");
+  links[key] ??= { a: e.src, b: e.rx, sent: 0, ok: 0 };
+  links[key].sent++;
+  if (e.delivered) links[key].ok++;
+}
+const linkLayer = el("g", {}, map), flashLayer = el("g", {}, map), nodeLayer = el("g", {}, map);
+for (const l of Object.values(links)) {
+  const ratio = l.ok / l.sent;
+  const line = el("path", { d: arc(byId[Math.min(l.a, l.b)], byId[Math.max(l.a, l.b)]), fill: "none",
+    "stroke-width": 1 + Math.log2(l.sent),
+    stroke: ratio > 0.9 ? css("--ok") : ratio > 0 ? css("--ap") : css("--lost"), "stroke-opacity": 0.35 }, linkLayer);
+  el("title", {}, line).textContent = `${l.a} - ${l.b}: ${l.ok}/${l.sent} delivered`;
+}
+for (const n of RUN.nodes) {
+  const [x, y] = px(n);
+  const g = el("g", {}, nodeLayer);
+  const isAp = n.firmware === "access point";
+  if (isAp) el("rect", { x: x - 10, y: y - 10, width: 20, height: 20, fill: css("--ap") }, g);
+  else el("circle", { cx: x, cy: y, r: 11, fill: css("--node") }, g);
+  el("text", { x, y: y + 4, "text-anchor": "middle", "font-size": 11, fill: css("--panel") }, g)
+    .textContent = isAp ? "AP" : n.id;
+  el("text", { x, y: isAp ? y - 16 : y + 26, "text-anchor": "middle", "font-size": 10, fill: css("--muted") }, g)
+    .textContent = isAp ? `access point, ch ${n.channel}` : n.firmware;
+  el("title", {}, g).textContent = `${isAp ? "access point" : "node " + n.id} ${n.mac} (${n.pos.join(", ")} m)`;
+}
+
+const scrub = document.getElementById("scrub"), clock = document.getElementById("clock");
+const packets = document.getElementById("packets"), consoleEl = document.getElementById("console");
+scrub.max = RUN.duration_us;
+let now = 0, playing = false, last = 0, shown = null;
+
+const logs = {};
+for (const [id, text] of Object.entries(RUN.logs)) {
+  logs[id] = text.replace(/\r/g, "").split("\n").map(line => {
+    const m = line.match(/^[IWED] \((\d+)\)/);
+    return { ms: m ? Number(m[1]) : 0, line };
+  });
+}
+const tabs = document.getElementById("tabs");
+for (const id of Object.keys(logs)) {
+  const b = document.createElement("button");
+  b.textContent = `node ${id}`;
+  b.setAttribute("role", "tab");
+  b.onclick = () => { shown = id; render(); };
+  tabs.appendChild(b);
+}
+shown = Object.keys(logs)[0] ?? null;
+
+function describe(e) {
+  const kind = e.wifi ? "Wi-Fi" : "ESP-NOW";
+  const to = e.rx === 0 ? "AP" : e.rx, from = e.src === 0 ? "AP" : e.src;
+  const verdict = e.delivered ? `delivered, ${e.rssi_dbm} dBm` : `lost (${e.reason})`;
+  const tries = e.attempts > 1 ? `, ${e.attempts} attempts` : "";
+  return `${(e.t_us / 1e6).toFixed(4)} s  ${from} -> ${to}  ${kind} ${e.bytes} B  ${verdict}${tries}`;
+}
+
+function render() {
+  scrub.value = now;
+  clock.textContent = `${(now / 1e6).toFixed(3)} s`;
+  flashLayer.replaceChildren();
+  for (const e of events) {
+    if (e.t_us > now) break;
+    if (now - (e.rx_t_us ?? e.t_us) > FLASH_US) continue;
+    const [a, b] = [byId[Math.min(e.src, e.rx)], byId[Math.max(e.src, e.rx)]];
+    el("path", { d: arc(a, b), fill: "none", "stroke-width": 3, stroke: e.delivered ? css("--ok") : css("--lost"),
+                 "stroke-dasharray": e.delivered ? "" : "6 4" }, flashLayer);
+  }
+  const past = events.filter(e => e.t_us <= now).slice(-60);
+  packets.replaceChildren(...past.map(e => {
+    const li = document.createElement("li");
+    li.textContent = describe(e);
+    if (!e.delivered) li.className = "lost";
+    return li;
+  }));
+  packets.scrollTop = packets.scrollHeight;
+  for (const b of tabs.children) b.setAttribute("aria-selected", b.textContent === `node ${shown}`);
+  if (shown !== null) {
+    consoleEl.textContent = logs[shown].filter(l => l.ms * 1000 <= now).map(l => l.line).join("\n");
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+}
+
+function tick(ts) {
+  if (!playing) return;
+  now = Math.min(RUN.duration_us, now + (ts - last) * 1000 * Number(document.getElementById("speed").value));
+  last = ts;
+  render();
+  if (now >= RUN.duration_us) { playing = false; document.getElementById("play").textContent = "Play"; return; }
+  requestAnimationFrame(tick);
+}
+document.getElementById("play").onclick = ev => {
+  playing = !playing;
+  ev.target.textContent = playing ? "Pause" : "Play";
+  if (now >= RUN.duration_us) now = 0;
+  last = performance.now();
+  if (playing) requestAnimationFrame(tick);
+};
+scrub.oninput = () => { now = Number(scrub.value); render(); };
+render();
+</script>
+</body>
+</html>

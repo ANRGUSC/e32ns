@@ -129,3 +129,4 @@ async def test_run_scenario_writes_results(tmp_path):
     assert result.stats.rx_delivered == 3
     assert [(e["src"], e["rx"], e["delivered"]) for e in saved["events"]] == [(1, 2, True)] * 3
     assert (tmp_path / "trace.pcapng").stat().st_size > 0
+    assert '"name": "t"' in (tmp_path / "report.html").read_text(encoding="utf-8")

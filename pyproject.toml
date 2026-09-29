@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Optional accelerator for the medium's N x N path-loss math at large scale (see D-001).
-accel = ["numpy>=1.24"]
+# Espressif's own NVS writer: gives each QEMU node its identity without hand-encoding NVS pages.
+qemu = ["esp-idf-nvs-partition-gen>=0.1"]
 dev = ["pytest>=7.4", "pytest-asyncio>=0.23"]
 
 [project.scripts]
@@ -25,10 +25,10 @@ esp-netsim = "esp_netsim.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+esp_netsim = ["trace/report.html"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q"
-
-[tool.esp_netsim]
-# Non-code project knobs are documented in RESEARCH_LOG.md; runtime config is YAML (see configs/).

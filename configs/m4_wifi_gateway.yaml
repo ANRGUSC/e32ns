@@ -6,7 +6,7 @@ name: m4_wifi_gateway
 wifi_ap: { pos: [0, 0], channel: 6 }
 
 nodes:
-  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [10, 0],  channel: 6, wifi: true, firmware: ../firmware/examples/wifi_http/build }
+  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [25, 0],  channel: 6, wifi: true, firmware: ../firmware/examples/wifi_http/build }
   - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [160, 0], channel: 6, wifi: true, firmware: ../firmware/examples/wifi_http/build }
   - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [0, 230], channel: 6, wifi: true, firmware: ../firmware/examples/wifi_http/build }
 
