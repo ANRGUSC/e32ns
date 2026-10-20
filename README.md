@@ -42,11 +42,16 @@ Real firmware needs Linux or WSL2, ESP-IDF v5.4.2 and the Espressif QEMU fork:
 ```bash
 firmware/qemu/setup_esp_idf.sh                 # one time: ESP-IDF, QEMU, libslirp
 . ~/esp/esp-idf/export.sh
-for app in espnow_ping espnow_pong wifi_http; do idf.py -C firmware/examples/$app build; done
+for app in espnow_ping espnow_pong wifi_http espnow_txprobe; do idf.py -C firmware/examples/$app build; done
 pip install -e ".[qemu]"
 export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH   # only if setup fetched libslirp
 esp-netsim run configs/m2_two_qemu.yaml
 ```
+
+The same apps build for a real board with `idf.py -C firmware/examples/<app> -B build_hw
+-DESPNET_HARDWARE=1 -DSDKCONFIG=build_hw/sdkconfig build`; flash with
+`python -m esptool --chip esp32s3 --port <port> write_flash @flash_args` from `build_hw`.
+Board-vs-emulator results are in RESEARCH_LOG.md V-014.
 
 ## Scenario files
 
@@ -105,7 +110,8 @@ src/esp_netsim/
   protocol.py            node <-> medium wire format (mirrored by the C shim)
   config/ trace/ nodes/ transport/ cli.py
 firmware/components/espnet_shim/   the ESP-IDF shim (C)
-firmware/examples/                 firmware A (espnow_ping), B (espnow_pong), C (wifi_http)
+firmware/examples/                 firmware A (espnow_ping), B (espnow_pong), C (wifi_http),
+                                   D (espnow_txprobe, send-callback timing for board comparison)
 configs/                           scenarios
 tests/                             pytest suite
 docs/                              raw evidence logs from the feasibility spikes

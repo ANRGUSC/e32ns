@@ -32,11 +32,21 @@ def test_unicast_success_when_deliverable():
     assert out.receivers[0].delivered
 
 
-def test_unicast_fail_peer_not_exist():
-    eng = make_engine()
+def test_unicast_to_absent_mac_sends_every_attempt():
+    eng = make_engine(max_retries=34)
     eng.add_node(1, MAC1)
     out = eng.transmit(frame(1, MAC1, MAC2))  # no node has MAC2
-    assert out.status == "fail" and out.reason == "peer_not_exist"
+    assert out.status == "fail" and out.reason == "no_receiver"
+    assert out.attempts == 35
+
+
+def test_neighbour_defers_through_whole_retry_sequence():
+    eng = make_engine(max_retries=34)
+    eng.add_node(1, MAC1, x=0)
+    eng.add_node(2, MAC2, x=5)
+    lost = eng.transmit(frame(1, MAC1, MAC3))  # no node has MAC3
+    out = eng.transmit(frame(2, MAC2, BROADCAST_MAC, start=lost.airtime_us // 2))
+    assert out.frame.start_us == lost.airtime_us
 
 
 def test_unicast_fail_channel_mismatch():

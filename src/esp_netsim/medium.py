@@ -94,7 +94,7 @@ class MediumConfig:
     bandwidth_hz: float = 22_000_000.0  # DSSS channel width (brief §5)
     capture_threshold_db: float = 4.0   # min SINR to capture a frame (brief §3/§5)
     cca_threshold_dbm: float = -82.0    # 802.11 preamble-detect level: at or above, a sender defers
-    max_retries: int = 3                # unicast MAC retransmissions (brief §3)
+    max_retries: int = 34               # unicast retransmissions, measured on an ESP32-S3
     seed: int = 0
 
 
@@ -146,13 +146,13 @@ class MediumEngine:
             outcomes.append(self._evaluate_frame(f, airtimes[idx], windows[idx],
                                                  _Interference(f.channel, others)))
 
-        # Register as in-flight ONLY the frames that actually radiated. Frames
-        # rejected before transmission (peer_not_exist / channel_mismatch /
-        # encrypt_no_matching_lmk) emit no RF energy and must not
-        # interfere with later frames (review BUG-1). attempts>0 == "went on the air".
+        # Register as in-flight ONLY the frames that actually radiated, for every attempt.
+        # Frames rejected before transmission (channel_mismatch / encrypt_no_matching_lmk)
+        # emit no RF energy and must not interfere with later frames (review BUG-1).
         for idx, outcome in enumerate(outcomes):
             if outcome.attempts > 0:
-                self._in_flight.append(_InFlight(frames[idx], windows[idx][1]))
+                end = frames[idx].start_us + outcome.airtime_us
+                self._in_flight.append(_InFlight(frames[idx], end))
         return outcomes
 
     def transmit(self, frame: Frame) -> TxOutcome:
@@ -253,7 +253,9 @@ class MediumEngine:
                           window: tuple[int, int], interference: "_Interference") -> TxOutcome:
         dst_id = self.node_id_for_mac(f.dst_mac)
         if dst_id is None:
-            return TxOutcome(f, "fail", airtime_us, 0, [], "peer_not_exist")  # brief §3
+            # The radio cannot know nobody is there: it sends every attempt and hears no ACK.
+            attempts = self.cfg.max_retries + 1
+            return TxOutcome(f, "fail", airtime_us * attempts, attempts, [], "no_receiver")
         dst = self._nodes[dst_id]
         if dst.channel != f.channel:
             return TxOutcome(f, "fail", airtime_us, 0, [], "channel_mismatch")  # brief §3

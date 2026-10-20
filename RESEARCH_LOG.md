@@ -1252,14 +1252,96 @@ node 10 in the middle logged 97 RTTs in the development run.
 
 ---
 
+## V-014 / D-034 — First hardware measurement: a unicast nobody ACKs takes ~35 attempts
+
+**Setup.** One ESP32-S3 board (rev v0.2, CH343 USB serial), ESP-IDF v5.4.2, indoors on channel 1
+with ordinary home Wi-Fi around. Firmware A built with `-DESPNET_HARDWARE=1` boots unmodified and
+pings every 100 ms. With one board there is nothing to answer, so the A/B checks of Appendix E
+wait for a second board. What one board can measure is the send callback, which the medium
+models: firmware D (`espnow_txprobe`) times `esp_now_send` to its callback, one send in flight,
+for a broadcast and for a unicast to `02:00:00:00:00:99` (a registered peer no device holds),
+at 16, 128 and 250 bytes. The same image runs in the emulator as `configs/hw_txprobe.yaml`.
+
+**Result** (µs; board n ≈ 93 per row, emulator n ≈ 62):
+
+| send | len | board min | board p50 | board p95 | emulator p50 before | after |
+|---|---|---|---|---|---|---|
+| broadcast | 16 | 1,118 | 1,869 | 5,737 | 1,857 | 1,983 |
+| broadcast | 128 | 2,013 | 2,625 | 6,585 | 3,278 | 2,219 |
+| broadcast | 250 | 2,992 | 3,615 | 6,763 | 3,681 | 3,642 |
+| unicast, no ACK | 16 | 28,814 | 38,937 | 65,398 | 1,994 | 33,287 |
+| unicast, no ACK | 128 | 60,397 | 74,508 | 94,391 | 3,177 | 60,215 |
+| unicast, no ACK | 250 | 92,876 | 105,323 | 126,559 | 3,498 | 90,455 |
+
+**Reading.** Broadcast cost grows 8.0 µs per byte, so ESP-NOW goes out at 1 Mbps as the model
+assumes. The board adds ~400 µs per send that the airtime model does not have (driver path);
+the emulator hides it under its 1.5–4 ms quantum (V-010). A failed unicast grows 274 µs per byte
+at the minimum and 284 at the median. Each transmission costs 8 µs per byte, so the radio sends
+the frame about 35 times before reporting FAIL. The medium had two errors here. It allowed
+4 transmissions (`max_retries: 3`, from the brief), and for a destination no node holds it
+reported `peer_not_exist` at once without radiating. A real sender cannot know nobody is there.
+
+**Decision.**
+1. `max_retries` defaults to 34 (35 transmissions).
+2. A unicast to a MAC no node holds radiates every attempt and fails as `no_receiver`.
+3. A frame stays in flight for all its attempts, not just the first, so neighbours defer
+   through a whole retry sequence (a failed 250-byte unicast holds the channel ~100 ms).
+
+**Residual.** With the same airtime model, the expected time to fail is 37.0 / 68.4 / 102.6 ms.
+The board measures 1.03–1.09× that; the ~15-byte ESP-NOW vendor header the model omits accounts
+for about 4 ms of it. The emulator measures 0.88–0.90×: the medium schedules the callback at the
+right virtual time, but the guest's `esp_timer` advances slower than the host time the barrier
+credits, the drift V-010 already measured (0.85–0.96). Closing that needs the guest clock itself
+to set virtual time, which is the `-icount` item in Appendix C. Retries for Wi-Fi data frames
+use the same default but were not measured; on hardware they also go through rate control.
+
+**Sources.** This session's board and emulator logs; `firmware/examples/espnow_txprobe`.
+
+---
+
+## V-015 — V-014 repeated on a second board
+
+**Setup.** With the V-014 board (MAC `d4:05:92:7b:14:fc`) unavailable, a different ESP32-S3
+(rev v0.2, CH343, MAC `d4:05:92:79:90:c8`, 8 MB PSRAM) ran the same `build_hw` image of
+firmware D, channel 1, on 2026-10-20. All 600 sends logged (n = 100 per row).
+
+**Result** (µs):
+
+| send | len | min | p50 | p95 | V-014 p50 |
+|---|---|---|---|---|---|
+| broadcast | 16 | 1,117 | 1,211 | 2,543 | 1,869 |
+| broadcast | 128 | 2,015 | 2,221 | 3,796 | 2,625 |
+| broadcast | 250 | 2,992 | 3,115 | 4,629 | 3,615 |
+| unicast, no ACK | 16 | 27,887 | 32,324 | 38,955 | 38,937 |
+| unicast, no ACK | 128 | 57,767 | 63,102 | 74,662 | 74,508 |
+| unicast, no ACK | 250 | 88,749 | 95,103 | 104,807 | 105,323 |
+
+**Reading.** Minima match V-014 to within 3 %, and broadcast still costs 8.1 µs per byte
+(1 Mbps). Medians and tails are lower on every row, broadcast included, so the channel was
+quieter during this run; that is carrier-sense deferral, not the radio. A failed unicast
+grows 260 µs per byte at the minimum and 268 at the median, i.e. 32–34 transmissions against
+V-014's 34–35. Across two boards the retry count is 33–35 transmissions; `max_retries: 34`
+stays. Against the model's expected time to fail (37.0 / 68.4 / 102.6 ms) this board reads
+0.87–0.93×, where V-014 read 1.03–1.09×. The V-014 excess was channel load in that run, so
+the emulator's 0.88–0.90× sits inside the spread of the two boards and the guest-clock drift
+in V-014's residual is not separable from channel load with these data.
+
+**Sources.** This session's board log; same firmware and scripts as V-014.
+
+---
+
 ## Status snapshot (end of this session)
 
 - M1–M6 run with real firmware (M1 in every scenario, M5 and M6 for every run). Scenarios:
-  `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`; mock-only
-  `two_node`, `multi_node_espnow`.
-- 61 tests (medium, barrier, wire codec, config, trace, Wi-Fi bridge, runner end to end).
-- Limits: timing quantized to 1.5–4 ms of virtual time (V-010); no 802.11 association frames
-  (D-032); no hardware validation (Appendix E).
+  `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`, `hw_txprobe`;
+  mock-only `two_node`, `multi_node_espnow`.
+- 62 tests (medium, barrier, wire codec, config, trace, Wi-Fi bridge, runner end to end).
+  `test_mixed_barrier_qemu_sender_to_mock_receiver` is wall-clock sensitive and fails about
+  one run in three, before and after D-034.
+- Two boards measured one at a time (V-014, V-015): send-callback timing, and the retry
+  count now in the medium. Never two boards at once, so A/B is still open.
+- Limits: timing quantized to 1.5–4 ms of virtual time and guest clocks ~12 % slow (V-010,
+  V-014); no 802.11 association frames (D-032); the A/B checks need a second board.
 
 ---
 
@@ -1344,8 +1426,8 @@ uses the slice of arrival (D-029).
 | M6 | GUI: nodes, links, packets, console | done as a replay page | `out/<name>/report.html` (D-033) |
 
 **Next, in order.**
-1. Hardware validation (Appendix E): same A/B firmware on boards and in the emulator, RTT and
-   PDR vs distance.
+1. Hardware validation with two boards (Appendix E): same A/B firmware on boards and in the
+   emulator, RTT and PDR vs distance.
 2. Tighter timing: `-icount` on the Xtensa fork, or a run-to-next-event barrier, to get the
    quantum below QMP overhead (V-010).
 3. 802.11 association frames and station-to-station traffic through one shared AP.
@@ -1356,7 +1438,7 @@ uses the slice of arrival (D-029).
 ```bash
 firmware/qemu/setup_esp_idf.sh                   # ESP-IDF v5.4.2, QEMU 9.0.0, libslirp without sudo
 . ~/esp/esp-idf/export.sh
-for app in espnow_ping espnow_pong wifi_http; do idf.py -C firmware/examples/$app build; done
+for app in espnow_ping espnow_pong wifi_http espnow_txprobe; do idf.py -C firmware/examples/$app build; done
 python3 -m venv ~/netsim-venv && ~/netsim-venv/bin/pip install -e ".[qemu,dev]"
 export LD_LIBRARY_PATH=$HOME/.local/lib          # if setup fetched libslirp
 ~/netsim-venv/bin/esp-netsim run configs/m4_wifi_gateway.yaml
@@ -1373,7 +1455,11 @@ Done, no hardware: V-001 (emergent ~200 m range matches published ESP-NOW LOS ra
 unit reference points (Friis reference loss, DCF constants, airtime); M2–M4 behave as the model
 predicts (loss rate, distance falloff, retries, hidden terminals).
 
-Next, with boards. Run firmware A and B unmodified (`-DESPNET_HARDWARE=1`) on N boards and in
+Done, one board (V-014): firmware A boots unmodified on an ESP32-S3; send-callback latency for
+broadcast and for an unanswered unicast, 16–250 bytes, board vs emulator. This set the retry
+count to 35 transmissions and made an unanswered unicast radiate.
+
+Next, with two or more boards. Run firmware A and B unmodified (`-DESPNET_HARDWARE=1`) on N boards and in
 the emulator:
 1. RTT distribution (median, P95) vs payload size. Expect the emulator to read high by roughly
    one to two effective quanta (V-010); that gap is the number to report.

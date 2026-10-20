@@ -17,7 +17,7 @@ from esp_netsim.protocol import BROADCAST_MAC
 MAC1 = "aa:bb:cc:00:00:01"
 MAC2 = "aa:bb:cc:00:00:02"
 MAC3 = "aa:bb:cc:00:00:03"
-ABSENT = "aa:bb:cc:00:00:09"
+OTHER_CHANNEL = "aa:bb:cc:00:00:09"
 
 
 def _frame(src_node, src_mac, dst, start, ch=1):
@@ -25,16 +25,17 @@ def _frame(src_node, src_mac, dst, start, ch=1):
 
 
 def test_bug1_rejected_frame_does_not_interfere():
-    # node1 unicasts to an ABSENT mac (peer_not_exist, no radiation), then node2
+    # node1 unicasts to a peer on another channel (rejected, no radiation), then node2
     # broadcasts overlapping in time; node3 must still receive node2's frame.
     eng = MediumEngine(MediumConfig(error_model=ConstantErrorModel(0.0),
                                     capture_threshold_db=6.0))
     eng.add_node(1, MAC1, x=-10, y=0)
     eng.add_node(2, MAC2, x=10, y=0)
     eng.add_node(3, MAC3, x=0, y=0)
+    eng.add_node(4, OTHER_CHANNEL, x=50, y=0, channel=6)
 
-    rej = eng.transmit(_frame(1, MAC1, ABSENT, start=0))
-    assert rej.status == "fail" and rej.reason == "peer_not_exist"
+    rej = eng.transmit(_frame(1, MAC1, OTHER_CHANNEL, start=0))
+    assert rej.status == "fail" and rej.reason == "channel_mismatch"
     assert rej.attempts == 0
 
     # Same start time: had the rejected frame been registered in-flight, this would

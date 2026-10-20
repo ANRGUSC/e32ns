@@ -43,7 +43,7 @@ class MediumConfigSpec:
     tx_power_dbm: float = 20.0
     noise_figure_db: float = 7.0
     capture_threshold_db: float = 4.0
-    max_retries: int = 3
+    max_retries: int = 34
 
     def build(self, seed: int) -> MediumConfig:
         if self.error_model == "constant":
@@ -219,7 +219,7 @@ def _parse_medium(m: dict) -> MediumConfigSpec:
         tx_power_dbm=float(m.get("tx_power_dbm", 20.0)),
         noise_figure_db=float(m.get("noise_figure_db", 7.0)),
         capture_threshold_db=float(m.get("capture_threshold_db", 4.0)),
-        max_retries=int(m.get("max_retries", 3)))
+        max_retries=int(m.get("max_retries", 34)))
 
 
 def load_scenario(path: str) -> ScenarioConfig:

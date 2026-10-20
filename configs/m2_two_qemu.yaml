@@ -1,6 +1,6 @@
 # M2: two real ESP32-S3 firmware nodes over a controlled 20 %-loss link.
 # Node 1 runs firmware A (broadcast pings), node 2 firmware B (unicast replies with retries).
-# Expected: ~80 % of pings arrive; nearly every reply is ACKed (1 - 0.2^4).
+# Expected: ~80 % of pings arrive; every reply is ACKed within the 35-attempt budget (V-014).
 name: m2_two_qemu
 
 nodes:

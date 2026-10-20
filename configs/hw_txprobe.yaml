@@ -1,0 +1,11 @@
+# Hardware comparison: one node runs firmware D, the same image measured on a real board
+# (RESEARCH_LOG V-014). Broadcasts report success once on air; unicasts go to a MAC no node has.
+name: hw_txprobe
+
+nodes:
+  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0, 0], firmware: ../firmware/examples/espnow_txprobe/build }
+
+run:
+  duration_us: 20000000
+  slice_us: 250
+  seed: 1
