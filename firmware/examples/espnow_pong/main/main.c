@@ -1,4 +1,4 @@
-/* Firmware B: answer every ping with a unicast reply to its sender. */
+/* Firmware B: answer every ping with a unicast reply of the same length to its sender. */
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -9,7 +9,8 @@
 
 typedef struct {
     uint8_t src[6];
-    ping_msg_t msg;
+    int len;
+    uint8_t data[ESP_NOW_MAX_DATA_LEN];
 } reply_job_t;
 
 static const char *TAG = "pong";
@@ -18,9 +19,9 @@ static QueueHandle_t s_jobs;
 /* The receive callback runs in the Wi-Fi task on hardware; sending from it is discouraged. */
 static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
     reply_job_t job;
-    if (len != sizeof job.msg) return;
-    memcpy(&job.msg, data, sizeof job.msg);
-    if (job.msg.kind != 'P') return;
+    if (len < (int)sizeof(ping_msg_t) || data[0] != 'P') return;
+    job.len = len;
+    memcpy(job.data, data, len);
     memcpy(job.src, info->src_addr, 6);
     xQueueSend(s_jobs, &job, 0);
 }
@@ -42,7 +43,7 @@ void app_main(void) {
         esp_now_peer_info_t peer = { .channel = ESPNOW_CHANNEL };
         memcpy(peer.peer_addr, job.src, 6);
         esp_now_add_peer(&peer);  /* ESP_ERR_ESPNOW_EXIST on repeat is expected */
-        job.msg.kind = 'R';
-        esp_now_send(job.src, (const uint8_t *)&job.msg, sizeof job.msg);
+        job.data[0] = 'R';
+        esp_now_send(job.src, job.data, job.len);
     }
 }

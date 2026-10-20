@@ -1330,18 +1330,53 @@ in V-014's residual is not separable from channel load with these data.
 
 ---
 
+## V-016 — A/B on two boards: RTT vs payload, board vs emulator
+
+**Setup.** Two ESP32-S3 boards side by side on one PC, RSSI −17 to −30 dBm: firmware A on
+`d4:05:92:7b:14:fc` (COM6), firmware B on `d4:05:92:79:90:c8` (COM8), both built with
+`-DESPNET_HARDWARE=1`. Firmware A takes a build option `PING_LEN` (default 13, the bare
+`ping_msg_t`) and B now echoes whatever length arrives. 60 s per size, 600 pings each.
+The emulator runs the same sources as `configs/hw_ab.yaml`: one pair per size, pairs 2 km
+apart so they never hear each other (every cross-pair copy dropped), 20 s, ~160 pings each.
+
+**Result** (RTT, µs; no ping lost and no reply FAILED on either side):
+
+| len | board p50 | board p95 | board mean | emulator p50 | emulator mean | emulator − board |
+|---|---|---|---|---|---|---|
+| 13 | 3,112 | 5,528 | 3,513 | 5,989 | 6,168 | +2,655 |
+| 128 | 4,911 | 6,827 | 5,277 | 5,945 | 6,251 | +974 |
+| 250 | 6,920 | 9,418 | 7,370 | 9,545 | 9,521 | +2,151 |
+
+**Reading.** On the boards RTT grows 16.3 µs per byte, two 1 Mbps transmissions of 8 µs per
+byte, so the airtime model matches the radio on both legs. The emulator reads high by 1.0–2.7 ms,
+0.4–1.2 of its 2.2 ms effective quantum in this six-node run (1.8 ms with two nodes, where the
+13-byte gap was 1.3 ms). It cannot see the 13 → 128 byte step at all (+83 µs against the boards'
++1.8 ms) because both round trips fit in the same number of quanta; 250 bytes crosses one more
+boundary and jumps by a full quantum. So the emulator's latency is right only to within one
+quantum, and differences smaller than a quantum vanish. That is Appendix E's prediction, now
+measured, and it puts timing resolution (Appendix C item 2) ahead of everything else.
+
+A first 128-byte run had 9 % of RTTs between 10 and 88 ms with no failed reply; a repeat ten
+minutes later had none above 15 ms. The repeat is in the table; the first run's tail was
+other traffic on channel 1.
+
+**Sources.** This session's board and emulator logs; `firmware/examples/espnow_ping`,
+`espnow_pong`, `configs/hw_ab.yaml`.
+
+---
+
 ## Status snapshot (end of this session)
 
 - M1–M6 run with real firmware (M1 in every scenario, M5 and M6 for every run). Scenarios:
-  `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`, `hw_txprobe`;
+  `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`, `hw_txprobe`, `hw_ab`;
   mock-only `two_node`, `multi_node_espnow`.
 - 62 tests (medium, barrier, wire codec, config, trace, Wi-Fi bridge, runner end to end).
   `test_mixed_barrier_qemu_sender_to_mock_receiver` is wall-clock sensitive and fails about
   one run in three, before and after D-034.
-- Two boards measured one at a time (V-014, V-015): send-callback timing, and the retry
-  count now in the medium. Never two boards at once, so A/B is still open.
-- Limits: timing quantized to 1.5–4 ms of virtual time and guest clocks ~12 % slow (V-010,
-  V-014); no 802.11 association frames (D-032); the A/B checks need a second board.
+- Hardware: send-callback timing and retry count on two boards (V-014, V-015); A/B RTT vs
+  payload on two boards together (V-016). PDR vs distance needs the boards moved apart.
+- Limits: timing quantized to 1.5–4 ms of virtual time, so latency differences under one
+  quantum vanish (V-010, V-016); no 802.11 association frames (D-032).
 
 ---
 
@@ -1426,10 +1461,9 @@ uses the slice of arrival (D-029).
 | M6 | GUI: nodes, links, packets, console | done as a replay page | `out/<name>/report.html` (D-033) |
 
 **Next, in order.**
-1. Hardware validation with two boards (Appendix E): same A/B firmware on boards and in the
-   emulator, RTT and PDR vs distance.
-2. Tighter timing: `-icount` on the Xtensa fork, or a run-to-next-event barrier, to get the
-   quantum below QMP overhead (V-010).
+1. Tighter timing: `-icount` on the Xtensa fork, or a run-to-next-event barrier, to get the
+   quantum below QMP overhead (V-010). V-016 shows this is now the largest board-vs-emulator gap.
+2. PDR vs distance on boards moved apart (Appendix E); RTT vs payload is done (V-016).
 3. 802.11 association frames and station-to-station traffic through one shared AP.
 4. A live (not replay) view, and topology editing in the GUI (PDF: "configuring topology").
 
@@ -1455,16 +1489,15 @@ Done, no hardware: V-001 (emergent ~200 m range matches published ESP-NOW LOS ra
 unit reference points (Friis reference loss, DCF constants, airtime); M2–M4 behave as the model
 predicts (loss rate, distance falloff, retries, hidden terminals).
 
-Done, one board (V-014): firmware A boots unmodified on an ESP32-S3; send-callback latency for
-broadcast and for an unanswered unicast, 16–250 bytes, board vs emulator. This set the retry
-count to 35 transmissions and made an unanswered unicast radiate.
+Done, one board (V-014, repeated on a second in V-015): firmware A boots unmodified on an
+ESP32-S3; send-callback latency for broadcast and for an unanswered unicast, 16–250 bytes, board
+vs emulator. This set the retry count to 35 transmissions and made an unanswered unicast radiate.
 
-Next, with two or more boards. Run firmware A and B unmodified (`-DESPNET_HARDWARE=1`) on N boards and in
-the emulator:
-1. RTT distribution (median, P95) vs payload size. Expect the emulator to read high by roughly
-   one to two effective quanta (V-010); that gap is the number to report.
-2. PDR vs distance. Tune `path_loss_exponent`, `tx_power_dbm`, `noise_figure_db` to the measured
-   curve and report the residual.
+Done, two boards (V-016): RTT vs payload (13, 128, 250 bytes), board vs emulator. The emulator
+reads high by 0.4–1.2 quanta and cannot resolve payload steps smaller than a quantum.
+
+Next, with the boards apart: PDR vs distance with firmware A and B. Tune `path_loss_exponent`,
+`tx_power_dbm`, `noise_figure_db` to the measured curve and report the residual.
 
 Success: PDR curves overlap within measurement variance on one nontrivial multi-node scenario,
 and the latency gap is explained by the quantum.

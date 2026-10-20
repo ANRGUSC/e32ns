@@ -1,0 +1,16 @@
+# Hardware comparison (RESEARCH_LOG V-016): firmware A and B as on two boards side by side,
+# one pair per ping length (13, 128, 250 bytes). Pairs sit 2 km apart so they never hear each other.
+name: hw_ab
+
+nodes:
+  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0, 0], firmware: ../firmware/examples/espnow_ping/build }
+  - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [0.3, 0], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [2000, 0], firmware: ../firmware/examples/espnow_ping/build_128 }
+  - { id: 4, mac: "aa:bb:cc:00:00:04", pos: [2000.3, 0], firmware: ../firmware/examples/espnow_pong/build }
+  - { id: 5, mac: "aa:bb:cc:00:00:05", pos: [4000, 0], firmware: ../firmware/examples/espnow_ping/build_250 }
+  - { id: 6, mac: "aa:bb:cc:00:00:06", pos: [4000.3, 0], firmware: ../firmware/examples/espnow_pong/build }
+
+run:
+  duration_us: 20000000
+  slice_us: 250
+  seed: 1
