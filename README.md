@@ -19,13 +19,15 @@ Every decision, measurement and known limitation is in [`RESEARCH_LOG.md`](RESEA
 | M4 Wi-Fi station to the real Internet | done, real firmware | `configs/m4_wifi_gateway.yaml` |
 | M5 config file launches every node, collects results | done | `esp-netsim run <scenario>` |
 | M6 visualization of nodes, links, packets, consoles | done (replay page per run) | `out/<name>/report.html` |
+| GUI topology editing (brief: "configuring topology") | done | `esp-netsim edit <scenario>` |
 
 The brief's example workflow (20 nodes, firmware A on some, firmware B on others, Wi-Fi from
 selected nodes) is `configs/example_20_nodes.yaml`.
 
-Not done: validation against physical ESP32-S3 boards. Timing is quantized to the barrier
-step, which QMP overhead holds at 1.5 to 4 ms of virtual time (V-010); delivery, loss and
-ordering are exact.
+Checked against two physical ESP32-S3 boards: retry count and send-callback timing (V-014,
+V-015), and RTT vs payload size (V-016). The emulator's RTT reads 0.6 ms (2 nodes) to ~1 ms
+(6 nodes) high, and timing is quantized to a 0.85–1.3 ms barrier step (D-035); delivery, loss
+and ordering are exact. Not done: delivery ratio vs distance on boards moved apart.
 
 ## Run it
 
@@ -73,6 +75,11 @@ run:
 `firmware` is an ESP-IDF build directory, relative to the scenario file. A node without
 `firmware` is a mock node driven by the scenario's `traffic` list (see `configs/two_node.yaml`).
 
+To place nodes on a map instead, run `esp-netsim edit configs/my_experiment.yaml` and open the
+printed URL. Drag nodes, add or delete them, change firmware and medium settings; each link shows
+the RSSI and delivery the medium predicts for it. Save validates the scenario and rewrites the
+file, keeping its leading comment block (comments further down are not kept).
+
 ## What a run produces (`out/<name>/`)
 
 - `report.html`: replay of the run, with node map, links coloured by delivery ratio, each frame
@@ -108,6 +115,7 @@ src/esp_netsim/
   channel/               path loss, SNR->PER, 802.11 airtime
   orchestrator/          barrier clock, scenario runner, QEMU launcher, Wi-Fi bridge
   protocol.py            node <-> medium wire format (mirrored by the C shim)
+  editor.py, editor.html  topology editor (esp-netsim edit)
   config/ trace/ nodes/ transport/ cli.py
 firmware/components/espnet_shim/   the ESP-IDF shim (C)
 firmware/examples/                 firmware A (espnow_ping), B (espnow_pong), C (wifi_http),

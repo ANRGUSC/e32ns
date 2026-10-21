@@ -26,7 +26,7 @@ esp-netsim = "esp_netsim.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-esp_netsim = ["trace/report.html"]
+esp_netsim = ["trace/report.html", "editor.html"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

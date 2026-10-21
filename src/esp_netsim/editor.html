@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>esp-netsim topology</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #d9d9d4;
+  --ok: #1f8a4c; --weak: #b7791f; --lost: #c8372d; --node: #2d5fa8; --mock: #6b6b66; --ap: #8a5a00;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151514; --panel: #1e1e1c; --ink: #ecece8; --muted: #9a9a93; --line: #3a3a36;
+          --ok: #4cc27f; --weak: #e0a548; --lost: #ef6a5f; --node: #7aa7ec; --mock: #9a9a93; --ap: #e0b050; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+         display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+header h1 { margin: 0; font-size: 17px; }
+header p { margin: 0; color: var(--muted); flex: 1; min-width: 200px; word-break: break-all; }
+#status.err { color: var(--lost); } #status.ok { color: var(--ok); }
+main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1.3fr); gap: 12px; padding: 12px 16px; }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; min-width: 0; }
+aside { display: grid; gap: 12px; align-content: start; min-width: 0; }
+h2 { margin: 0 0 8px; font-size: 14px; }
+svg { width: 100%; height: auto; display: block; touch-action: none; user-select: none; }
+svg .node { cursor: grab; }
+button, select, input { font: inherit; padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px;
+                        background: var(--bg); color: var(--ink); }
+button { cursor: pointer; }
+button.primary { background: var(--node); border-color: var(--node); color: var(--panel); }
+.controls { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+form[hidden] { display: none; }
+form { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 8px; align-items: center; }
+form input, form select { width: 100%; min-width: 0; }
+form input[type=checkbox] { width: auto; justify-self: start; }
+label { color: var(--muted); font-size: 13px; }
+.legend { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.legend b.ok { color: var(--ok); } .legend b.weak { color: var(--weak); } .legend b.lost { color: var(--lost); }
+#links { margin: 0; padding: 0; list-style: none; font: 12px/1.5 ui-monospace, Consolas, monospace;
+         max-height: 220px; overflow: auto; }
+code { font: 12px ui-monospace, Consolas, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Topology</h1>
+  <p id="path"></p>
+  <span id="status" role="status"></span>
+  <button id="save" class="primary">Save</button>
+</header>
+<main>
+  <section>
+    <h2>Drag nodes to place them</h2>
+    <svg id="map" role="img" aria-label="Node placement with predicted links"></svg>
+    <div class="controls">
+      <button id="add">Add node</button>
+      <button id="fit">Fit view</button>
+    </div>
+    <div class="legend">
+      Lines are the medium's prediction for one attempt with no interference (ESP-NOW: 50 bytes at
+      1 Mbps; dashed Wi-Fi: 100 bytes at 11 Mbps): <b class="ok">≥ 90 %</b>, <b class="weak">10–90 %</b>,
+      <b class="lost">&lt; 10 %</b>. Unicasts retry, so they do better than this. Grey nodes are mocks.
+      Run with <code id="runcmd"></code>.
+    </div>
+  </section>
+  <aside>
+    <section>
+      <h2 id="selTitle">Select a node</h2>
+      <form id="nodeForm" hidden>
+        <label for="f-id">id</label><input id="f-id" type="number" min="1" step="1">
+        <label for="f-mac">mac</label><input id="f-mac">
+        <label for="f-x">x (m)</label><input id="f-x" type="number" step="0.1">
+        <label for="f-y">y (m)</label><input id="f-y" type="number" step="0.1">
+        <label for="f-channel">channel</label><input id="f-channel" type="number" min="1" max="14" step="1">
+        <label for="f-firmware">firmware</label><input id="f-firmware" list="firmwares" placeholder="empty: mock node">
+        <label for="f-wifi">Wi-Fi station</label><input id="f-wifi" type="checkbox">
+        <span></span><button id="del" type="button">Delete node</button>
+      </form>
+      <datalist id="firmwares"></datalist>
+    </section>
+    <section>
+      <h2>Medium and run</h2>
+      <form id="simForm"></form>
+    </section>
+    <section>
+      <h2>Predicted links</h2>
+      <ul id="links"></ul>
+    </section>
+  </aside>
+</main>
+<script>
+const DATA = /*DATA*/null;
+const doc = DATA.doc;
+const NS = "http://www.w3.org/2000/svg";
+const map = document.getElementById("map");
+const W = 800, H = 520, PAD = 40;
+let links = [], selected = null, view = null, dirty = false;
+
+const isAp = n => n === doc.wifi_ap;
+const allNodes = () => doc.wifi_ap ? [...doc.nodes, doc.wifi_ap] : doc.nodes;
+const label = n => isAp(n) ? "AP" : String(n.id);
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  parent.appendChild(e);
+  return e;
+}
+
+function fit() {
+  const ps = allNodes().map(n => n.pos);
+  const minX = Math.min(...ps.map(p => p[0])), maxX = Math.max(...ps.map(p => p[0]));
+  const minY = Math.min(...ps.map(p => p[1])), maxY = Math.max(...ps.map(p => p[1]));
+  const k = Math.min((W - 2 * PAD) / Math.max(maxX - minX, 1), (H - 2 * PAD) / Math.max(maxY - minY, 1));
+  view = { k, ox: PAD + ((W - 2 * PAD) - (maxX - minX) * k) / 2 - minX * k,
+              oy: PAD + ((H - 2 * PAD) - (maxY - minY) * k) / 2 - minY * k };
+}
+const toScreen = p => [view.ox + p[0] * view.k, view.oy + p[1] * view.k];
+function toWorld(evt) {
+  const pt = new DOMPoint(evt.clientX, evt.clientY).matrixTransform(map.getScreenCTM().inverse());
+  return [Math.round((pt.x - view.ox) / view.k * 10) / 10, Math.round((pt.y - view.oy) / view.k * 10) / 10];
+}
+const byId = id => id === 0 ? doc.wifi_ap : doc.nodes.find(n => n.id === id);
+const colour = pdr => pdr >= 0.9 ? "var(--ok)" : pdr >= 0.1 ? "var(--weak)" : "var(--lost)";
+
+function scaleBar() {
+  const target = 120 / view.k, step = 10 ** Math.floor(Math.log10(target));
+  const m = [1, 2, 5, 10].map(f => f * step).filter(v => v <= target).pop() || step;
+  const g = el("g", { fill: "var(--muted)", stroke: "var(--muted)" }, map);
+  el("line", { x1: 12, y1: H - 14, x2: 12 + m * view.k, y2: H - 14, "stroke-width": 2 }, g);
+  el("text", { x: 12, y: H - 20, "font-size": 12, stroke: "none" }, g).textContent = `${m} m`;
+}
+
+function draw() {
+  map.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  map.replaceChildren();
+  scaleBar();
+  for (const l of [...links].sort((x, y) => x.wifi - y.wifi)) {  // Wi-Fi drawn on top
+    const a = byId(l.a), b = byId(l.b);
+    if (!a || !b) continue;
+    const [x1, y1] = toScreen(a.pos), [x2, y2] = toScreen(b.pos);
+    const line = el("line", { x1, y1, x2, y2, stroke: colour(l.pdr), "stroke-width": 1 + 2 * l.pdr,
+                              "stroke-dasharray": l.wifi ? "6 4" : "", opacity: 0.85 }, map);
+    el("title", {}, line).textContent = `${label(a)}–${label(b)}: ${l.rssi_dbm} dBm, ${Math.round(l.pdr * 100)} %`;
+  }
+  for (const n of allNodes()) {
+    const [x, y] = toScreen(n.pos);
+    const g = el("g", { class: "node", transform: `translate(${x},${y})`, tabindex: 0 }, map);
+    const fill = isAp(n) ? "var(--ap)" : n.firmware ? "var(--node)" : "var(--mock)";
+    if (isAp(n)) el("rect", { x: -11, y: -11, width: 22, height: 22, rx: 3, fill }, g);
+    else el("circle", { r: 12, fill }, g);
+    if (n === selected) el("circle", { r: 17, fill: "none", stroke: "var(--ink)", "stroke-width": 2 }, g);
+    el("text", { "text-anchor": "middle", dy: 4, "font-size": 11, fill: "var(--panel)" }, g).textContent = label(n);
+    el("title", {}, g).textContent = `${isAp(n) ? "access point" : "node " + n.id} (${n.pos[0]}, ${n.pos[1]}) m`;
+    g.addEventListener("pointerdown", e => startDrag(e, n));
+    g.addEventListener("keydown", e => { if (e.key === "Enter") select(n); });
+  }
+}
+
+// Capture on the svg: every redraw replaces the node elements under the pointer.
+function startDrag(e, n) {
+  e.preventDefault();
+  map.setPointerCapture(e.pointerId);
+  select(n);
+  const move = ev => { n.pos = [...toWorld(ev), ...n.pos.slice(2)]; markDirty(); draw(); showNode(); };
+  const up = () => { map.removeEventListener("pointermove", move); refresh(); };
+  map.addEventListener("pointermove", move);
+  map.addEventListener("pointerup", up, { once: true });
+}
+
+const f = id => document.getElementById("f-" + id);
+function select(n) { selected = n; showNode(); draw(); }
+function showNode() {
+  const n = selected, form = document.getElementById("nodeForm");
+  form.hidden = !n;
+  document.getElementById("selTitle").textContent = !n ? "Select a node" : isAp(n) ? "Access point" : `Node ${n.id}`;
+  if (!n) return;
+  for (const k of ["id", "firmware", "wifi"]) f(k).disabled = isAp(n);
+  document.getElementById("del").hidden = isAp(n);
+  f("id").value = isAp(n) ? 0 : n.id;
+  f("mac").value = n.mac || "";
+  [f("x").value, f("y").value] = n.pos;
+  f("channel").value = n.channel || 1;
+  f("firmware").value = n.firmware || "";
+  f("wifi").checked = !!n.wifi;
+}
+function setOrDrop(obj, key, value, keep) { if (keep) obj[key] = value; else delete obj[key]; }
+document.getElementById("nodeForm").addEventListener("change", () => {
+  const n = selected;
+  if (!isAp(n)) {
+    n.id = Number(f("id").value);
+    setOrDrop(n, "firmware", f("firmware").value.trim(), f("firmware").value.trim());
+    setOrDrop(n, "wifi", true, f("wifi").checked);
+  }
+  n.mac = f("mac").value.trim();
+  n.pos = [Number(f("x").value), Number(f("y").value), ...n.pos.slice(2)];
+  setOrDrop(n, "channel", Number(f("channel").value), Number(f("channel").value) !== 1 || isAp(n));
+  markDirty(); refresh();
+});
+document.getElementById("del").addEventListener("click", () => {
+  doc.nodes = doc.nodes.filter(n => n !== selected);
+  selected = null; showNode(); markDirty(); refresh();
+});
+document.getElementById("add").addEventListener("click", () => {
+  const id = Math.max(0, ...doc.nodes.map(n => n.id)) + 1;
+  const last = doc.nodes[doc.nodes.length - 1];
+  const n = { id, mac: "aa:bb:cc:00:" + [id >> 8, id & 255].map(b => b.toString(16).padStart(2, "0")).join(":"),
+              pos: [Math.round((W / 2 - view.ox) / view.k), Math.round((H / 2 - view.oy) / view.k)] };
+  if (last && last.firmware) n.firmware = last.firmware;
+  doc.nodes.push(n);
+  markDirty(); select(n); refresh();
+});
+document.getElementById("fit").addEventListener("click", () => { fit(); draw(); });
+
+const SIM = [["medium", "error_model", ["snr_per", "constant"]], ["medium", "packet_error_rate", 0],
+             ["medium", "path_loss_exponent", 3], ["medium", "tx_power_dbm", 20], ["medium", "noise_figure_db", 7],
+             ["run", "duration_us", 1000000], ["run", "slice_us", 1000], ["run", "seed", 0]];
+function buildSimForm() {
+  const form = document.getElementById("simForm");
+  for (const [sec, key, dflt] of SIM) {
+    const id = `s-${key}`, lab = document.createElement("label");
+    lab.htmlFor = id; lab.textContent = key;
+    let input;
+    if (Array.isArray(dflt)) {
+      input = document.createElement("select");
+      for (const o of dflt) input.append(new Option(o, o));
+    } else {
+      input = document.createElement("input");
+      input.type = "number"; input.step = "any";
+    }
+    input.id = id;
+    const cur = (doc[sec] || {})[key];
+    input.value = cur ?? (Array.isArray(dflt) ? dflt[0] : dflt);
+    input.addEventListener("change", () => {
+      doc[sec] = doc[sec] || {};
+      doc[sec][key] = input.tagName === "SELECT" ? input.value : Number(input.value);
+      markDirty(); refresh();
+    });
+    form.append(lab, input);
+  }
+}
+
+function setStatus(text, cls) { const s = document.getElementById("status"); s.textContent = text; s.className = cls || ""; }
+function markDirty() { dirty = true; setStatus("unsaved changes"); }
+
+async function post(url) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(doc) });
+  const body = await r.json();
+  if (!r.ok) throw new Error(body.error);
+  return body;
+}
+async function refresh() {
+  try {
+    links = (await post("/links")).links;
+    if (dirty) setStatus("unsaved changes");
+  } catch (err) {
+    setStatus(err.message, "err");
+  }
+  draw(); listLinks();
+}
+function listLinks() {
+  const ul = document.getElementById("links");
+  ul.replaceChildren(...[...links].sort((a, b) => b.pdr - a.pdr).map(l => {
+    const li = document.createElement("li");
+    li.style.color = colour(l.pdr);
+    li.textContent = `${label(byId(l.a))}–${label(byId(l.b))}${l.wifi ? " wifi" : ""}  ${l.rssi_dbm} dBm  ${Math.round(l.pdr * 100)} %`;
+    return li;
+  }));
+  if (!links.length) ul.textContent = "No pair can hear each other.";
+}
+document.getElementById("save").addEventListener("click", async () => {
+  try {
+    links = (await post("/save")).links;
+    dirty = false; setStatus("saved", "ok"); draw(); listLinks();
+  } catch (err) {
+    setStatus("not saved: " + err.message, "err");
+  }
+});
+window.addEventListener("beforeunload", e => { if (dirty) e.preventDefault(); });
+
+document.getElementById("path").textContent = DATA.path;
+document.getElementById("runcmd").textContent = `esp-netsim run ${DATA.path}`;
+document.getElementById("firmwares").replaceChildren(
+  ...[...new Set(doc.nodes.map(n => n.firmware).filter(Boolean))].map(v => new Option(v)));
+buildSimForm(); fit(); refresh();
+</script>
+</body>
+</html>

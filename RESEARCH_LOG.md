@@ -1392,12 +1392,36 @@ run per setting, so differences under ~0.2 ms are not resolved.
 
 ---
 
+## D-036 — Topology editing: a local page backed by the medium
+
+**Context.** The brief asks for a GUI "for configuring topology" as well as for visualizing runs;
+M6's replay page only shows a finished run.
+
+**Decision.** `esp-netsim edit <scenario>` serves one page on 127.0.0.1 (stdlib `http.server`).
+It draws the scenario's nodes and AP; nodes can be dragged, added, deleted, and their id, MAC,
+channel, firmware and Wi-Fi flag edited, along with the medium and run settings. Every change
+posts the scenario to the server, which parses it with the same `parse_scenario` as `run` and
+returns each pair's mean RSSI and one-attempt delivery from `MediumEngine.link_quality`, so the
+page never carries its own copy of the radio model. Save validates the same way and rewrites
+the file; an invalid scenario is refused and the file left alone. The page keeps the scenario as
+the raw YAML document, so sections it has no controls for (`traffic`, `port`) pass through.
+
+**Limits.** Comments below the file's leading block are lost on save. The prediction ignores
+shadowing, interference and retries (it says so on the page). On WSL the browser reaches the
+server through localhost forwarding.
+
+**Checked.** Three HTTP tests (predicted links fall off with distance; a save keeps the header
+and other sections; an invalid scenario is refused). In Chrome, driven by Playwright: drag,
+add node, change the path-loss exponent, save, and a duplicate MAC shown as an error.
+
+---
+
 ## Status snapshot (end of this session)
 
 - M1–M6 run with real firmware (M1 in every scenario, M5 and M6 for every run). Scenarios:
   `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`, `hw_txprobe`, `hw_ab`;
   mock-only `two_node`, `multi_node_espnow`.
-- 62 tests (medium, barrier, wire codec, config, trace, Wi-Fi bridge, runner end to end).
+- 65 tests (medium, barrier, wire codec, config, trace, Wi-Fi bridge, editor, runner end to end).
   `test_mixed_barrier_qemu_sender_to_mock_receiver` is wall-clock sensitive and fails about
   one run in three, before and after D-034.
 - Hardware: send-callback timing and retry count on two boards (V-014, V-015); A/B RTT vs
@@ -1486,13 +1510,14 @@ uses the slice of arrival (D-029).
 | M4 | Wi-Fi to the real Internet and back | done | `m4_wifi_gateway`: HTTP 200 near, retries at the edge, no DHCP out of range (D-032) |
 | M5 | Config file launches all nodes, collects results | done | `esp-netsim run` (D-033) |
 | M6 | GUI: nodes, links, packets, console | done as a replay page | `out/<name>/report.html` (D-033) |
+| — | GUI topology editing (brief: "configuring topology") | done | `esp-netsim edit` (D-036) |
 
 **Next, in order.**
 1. Find why RTT rises as slices shrink (D-035): timestamp the shim's TX and RX path in the
    guest. Then `-icount` or a run-to-next-event barrier for the ~0.5 ms QMP floor.
 2. PDR vs distance on boards moved apart (Appendix E); RTT vs payload is done (V-016).
 3. 802.11 association frames and station-to-station traffic through one shared AP.
-4. A live (not replay) view, and topology editing in the GUI (PDF: "configuring topology").
+4. A live (not replay) view of a running experiment.
 
 ## Appendix D — Runbook (Linux or WSL2)
 

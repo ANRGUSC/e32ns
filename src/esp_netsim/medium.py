@@ -159,6 +159,18 @@ class MediumEngine:
         """Convenience: process a single frame (no same-slice peers)."""
         return self.process_batch([frame])[0]
 
+    def link_quality(self, src_id: int, dst_id: int, nbytes: int,
+                     rate_mbps: float) -> tuple[float, float]:
+        """Mean RSSI and packet error rate of one attempt on a link with no interference."""
+        d = self._nodes[src_id].distance_to(self._nodes[dst_id])
+        rssi = self.cfg.link_budget.rx_power_dbm(self.cfg.propagation, d)
+        snr = self._sinr_db(rssi, [])
+        if snr < self.cfg.capture_threshold_db:
+            return rssi, 1.0
+        return rssi, self.cfg.error_model.per(ReceptionContext(
+            snr_db=snr, nbytes=nbytes, rate_mbps=rate_mbps, distance_m=d,
+            bandwidth_hz=self.cfg.bandwidth_hz))
+
     def _carrier_sense(self, frames: list[Frame], airtimes: dict[int, int]) -> list[Frame]:
         """Delay each frame past any earlier same-channel frame its sender can hear (DCF deferral)."""
         busy = [(i.frame, i.frame.start_us, i.end_us) for i in self._in_flight]
