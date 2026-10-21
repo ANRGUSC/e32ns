@@ -1365,6 +1365,30 @@ other traffic on channel 1.
 
 ---
 
+## D-035 — The barrier's sleep was most of the quantum
+
+**Measurement.** Timing each part of a barrier cycle (two nodes, `slice_us: 250`, 5 s):
+QMP `cont` round trip 0.46 ms, the wait between them 1.20 ms, `stop` round trip 0.69 ms;
+the guests ran 1.87 ms per cycle. The wait was `asyncio.sleep(0.00025)`, which the event loop
+rounds up to epoll's 1 ms timeout, and the guests run through all of it.
+
+**Decision.** The barrier waits with a blocking `time.sleep`. Frames that reach the medium
+during the wait sit in the socket buffer and are read during the `stop` round trip, or join the
+next batch as before (D-029). This supersedes D-029's finding that `slice_us` below the QMP
+floor does not matter: the floor was the sleep.
+
+**Result.** Effective quantum 2.0 → 0.85 ms (2 nodes), 2.2 → 1.26 ms (6), 1.16 ms on
+`m3_espnow_line`. With two nodes, `slice_us` 100 and 20 give 0.60 and 0.52 ms at nearly the
+same wall time per virtual second; ~0.5 ms is now the QMP round trips. On `hw_ab` (V-016) the
+emulator's mean RTT minus the boards' went from +2.7 / +1.0 / +2.2 ms to +1.1 / +1.4 / +0.9 ms
+at 13 / 128 / 250 bytes, and RTT now grows 15.6 µs per byte against the boards' 16.3, so the
+emulator resolves payload size. At `slice_us: 100` (quantum 0.99 ms) the 13-byte median is
+unchanged (4.58 against 4.39 ms), so the remaining ~1 ms is not the quantum. Likely the
+shim's transport (each TX and RX crosses lwIP and slirp while the guest runs); not yet measured.
+62 tests pass on three consecutive runs, the wall-clock-sensitive barrier test included.
+
+---
+
 ## Status snapshot (end of this session)
 
 - M1–M6 run with real firmware (M1 in every scenario, M5 and M6 for every run). Scenarios:
@@ -1375,8 +1399,8 @@ other traffic on channel 1.
   one run in three, before and after D-034.
 - Hardware: send-callback timing and retry count on two boards (V-014, V-015); A/B RTT vs
   payload on two boards together (V-016). PDR vs distance needs the boards moved apart.
-- Limits: timing quantized to 1.5–4 ms of virtual time, so latency differences under one
-  quantum vanish (V-010, V-016); no 802.11 association frames (D-032).
+- Limits: timing quantized to 0.85–1.3 ms of virtual time (D-035); RTT reads ~1 ms high
+  against boards for a reason not yet measured (D-035); no 802.11 association frames (D-032).
 
 ---
 
@@ -1461,8 +1485,8 @@ uses the slice of arrival (D-029).
 | M6 | GUI: nodes, links, packets, console | done as a replay page | `out/<name>/report.html` (D-033) |
 
 **Next, in order.**
-1. Tighter timing: `-icount` on the Xtensa fork, or a run-to-next-event barrier, to get the
-   quantum below QMP overhead (V-010). V-016 shows this is now the largest board-vs-emulator gap.
+1. Find the ~1 ms RTT excess left after D-035 (timestamp the shim's TX and RX path in the
+   guest). Below that, `-icount` or a run-to-next-event barrier for the ~0.5 ms QMP floor.
 2. PDR vs distance on boards moved apart (Appendix E); RTT vs payload is done (V-016).
 3. 802.11 association frames and station-to-station traffic through one shared AP.
 4. A live (not replay) view, and topology editing in the GUI (PDF: "configuring topology").

@@ -152,7 +152,8 @@ class Simulation:
         if not self.qemu_nodes:
             return 0
         resumed = await asyncio.gather(*(_timed(q.cont()) for q in self.qemu_nodes.values()))
-        await asyncio.sleep(wall_s)
+        # asyncio.sleep rounds up to epoll's 1 ms; the guests run through every bit of it.
+        time.sleep(wall_s)
         paused = await asyncio.gather(*(_timed(q.stop()) for q in self.qemu_nodes.values()))
         # Without -icount the guest clock follows the host clock while running; QEMU applies
         # cont and stop just before replying, so each node ran from one reply to the other.
