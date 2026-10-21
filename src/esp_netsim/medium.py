@@ -9,7 +9,7 @@ from typing import Optional
 
 from .protocol import normalize_mac, is_broadcast
 from .channel import units
-from .channel.pathloss import LogDistancePropagationLoss, LinkBudget
+from .channel.pathloss import LogDistance
 from .channel.error_model import ErrorRateModel, SnrPerErrorModel, ReceptionContext
 from .channel.airtime import AirtimeModel
 
@@ -19,7 +19,7 @@ AP_NODE_ID = 0              # scenario node ids start at 1
 @dataclass(frozen=True)
 class PeerInfo:
     mac: str
-    channel: int = 0            # 0 => "current channel" (brief §3)
+    channel: int = 0            # 0 => the node's current channel
     encrypt: bool = False
     lmk: Optional[bytes] = None
 
@@ -86,13 +86,12 @@ class _InFlight:
 
 @dataclass
 class MediumConfig:
-    propagation: LogDistancePropagationLoss = field(default_factory=LogDistancePropagationLoss)
-    link_budget: LinkBudget = field(default_factory=LinkBudget)
+    propagation: LogDistance = field(default_factory=LogDistance)
     error_model: ErrorRateModel = field(default_factory=SnrPerErrorModel)
     airtime: AirtimeModel = field(default_factory=AirtimeModel)
     noise_figure_db: float = 7.0        # typical Wi-Fi front-end NF
-    bandwidth_hz: float = 22_000_000.0  # DSSS channel width (brief §5)
-    capture_threshold_db: float = 4.0   # min SINR to capture a frame (brief §3/§5)
+    bandwidth_hz: float = 22_000_000.0  # DSSS channel width
+    capture_threshold_db: float = 4.0   # min SINR to capture a frame
     cca_threshold_dbm: float = -82.0    # 802.11 preamble-detect level: at or above, a sender defers
     max_retries: int = 34               # unicast retransmissions, measured on an ESP32-S3
     seed: int = 0
@@ -146,9 +145,8 @@ class MediumEngine:
             outcomes.append(self._evaluate_frame(f, airtimes[idx], windows[idx],
                                                  _Interference(f.channel, others)))
 
-        # Register as in-flight ONLY the frames that actually radiated, for every attempt.
-        # Frames rejected before transmission (channel_mismatch / encrypt_no_matching_lmk)
-        # emit no RF energy and must not interfere with later frames (review BUG-1).
+        # Only frames that radiated occupy the air, for all their attempts; a frame rejected
+        # before transmission (channel_mismatch, encrypt_no_matching_lmk) emits nothing.
         for idx, outcome in enumerate(outcomes):
             if outcome.attempts > 0:
                 end = frames[idx].start_us + outcome.airtime_us
@@ -162,14 +160,8 @@ class MediumEngine:
     def link_quality(self, src_id: int, dst_id: int, nbytes: int,
                      rate_mbps: float) -> tuple[float, float]:
         """Mean RSSI and packet error rate of one attempt on a link with no interference."""
-        d = self._nodes[src_id].distance_to(self._nodes[dst_id])
-        rssi = self.cfg.link_budget.rx_power_dbm(self.cfg.propagation, d)
-        snr = self._sinr_db(rssi, [])
-        if snr < self.cfg.capture_threshold_db:
-            return rssi, 1.0
-        return rssi, self.cfg.error_model.per(ReceptionContext(
-            snr_db=snr, nbytes=nbytes, rate_mbps=rate_mbps, distance_m=d,
-            bandwidth_hz=self.cfg.bandwidth_hz))
+        rssi = self._rx_power(self._nodes[src_id], self._nodes[dst_id])
+        return rssi, self._per(self._sinr_db(rssi, []), nbytes, rate_mbps)
 
     def _carrier_sense(self, frames: list[Frame], airtimes: dict[int, int]) -> list[Frame]:
         """Delay each frame past any earlier same-channel frame its sender can hear (DCF deferral)."""
@@ -187,17 +179,21 @@ class MediumEngine:
         return out
 
     def _hears(self, listener: int, talker: int) -> bool:
-        d = self._nodes[listener].distance_to(self._nodes[talker])
-        power = self.cfg.link_budget.rx_power_dbm(self.cfg.propagation, d)
-        return power >= self.cfg.cca_threshold_dbm
+        return (self._rx_power(self._nodes[talker], self._nodes[listener])
+                >= self.cfg.cca_threshold_dbm)
 
     def _prune_in_flight(self, now_us: int) -> None:
         self._in_flight = [i for i in self._in_flight if i.end_us > now_us]
 
-    def _rx_power_dbm(self, src: NodeState, dst: NodeState) -> tuple[float, float]:
-        d = src.distance_to(dst)
-        prx = self.cfg.link_budget.rx_power_dbm(self.cfg.propagation, d, self._rng)
-        return prx, d
+    def _rx_power(self, src: NodeState, dst: NodeState) -> float:
+        return self.cfg.propagation.rx_power_dbm(src.distance_to(dst))
+
+    def _per(self, sinr_db: float, nbytes: int, rate_mbps: float) -> float:
+        if sinr_db < self.cfg.capture_threshold_db:
+            return 1.0
+        return self.cfg.error_model.per(ReceptionContext(
+            snr_db=sinr_db, nbytes=nbytes, rate_mbps=rate_mbps,
+            bandwidth_hz=self.cfg.bandwidth_hz))
 
     def _sinr_db(self, wanted_dbm: float, interferer_powers_dbm: list[float]) -> float:
         noise_mw = units.dbm_to_mw(units.thermal_noise_dbm(self.cfg.bandwidth_hz,
@@ -208,26 +204,14 @@ class MediumEngine:
     def _reception(self, f: Frame, receiver: NodeState,
                    interferers: list[Frame], delivery_us: int) -> RxVerdict:
         """Compute a single receiver's verdict for frame f."""
-        src = self._nodes[f.src_node]
-        wanted_dbm, dist = self._rx_power_dbm(src, receiver)
-        interf_dbm = []
-        for g in interferers:
-            gsrc = self._nodes[g.src_node]
-            p, _ = self._rx_power_dbm(gsrc, receiver)
-            interf_dbm.append(p)
+        wanted_dbm = self._rx_power(self._nodes[f.src_node], receiver)
+        interf_dbm = [self._rx_power(self._nodes[g.src_node], receiver) for g in interferers]
         sinr = self._sinr_db(wanted_dbm, interf_dbm)
-
         if sinr < self.cfg.capture_threshold_db:
-            # Distinguish a genuine collision (interferers present) from a link that is
-            # simply too weak vs. noise (review LOW: mislabelled reason).
             reason = "collision" if interf_dbm else "below_sensitivity"
             return RxVerdict(receiver.node_id, False, wanted_dbm, sinr, 1.0,
                              reason, delivery_us)
-
-        ctx = ReceptionContext(snr_db=sinr, nbytes=len(f.payload),
-                               rate_mbps=f.rate_mbps, distance_m=dist,
-                               bandwidth_hz=self.cfg.bandwidth_hz)
-        per = self.cfg.error_model.per(ctx)
+        per = self._per(sinr, len(f.payload), f.rate_mbps)
         delivered = self._rng.random() >= per
         reason = "ok" if delivered else "snr_loss"
         return RxVerdict(receiver.node_id, delivered, wanted_dbm, sinr, per, reason,
@@ -253,11 +237,7 @@ class MediumEngine:
                 continue
             prop = self.cfg.airtime.propagation_delay_us(
                 self._nodes[f.src_node].distance_to(node))
-            v = self._reception(f, node, interferers, base_delivery + prop)
-            if v.delivered:
-                receivers.append(v)
-            else:
-                receivers.append(v)  # keep for tracing (delivered=False)
+            receivers.append(self._reception(f, node, interferers, base_delivery + prop))
         # Broadcast is unacknowledged, so the send callback reports success once on the air.
         return TxOutcome(f, "success", airtime_us, 1, receivers, "broadcast_unacked")
 
@@ -270,7 +250,7 @@ class MediumEngine:
             return TxOutcome(f, "fail", airtime_us * attempts, attempts, [], "no_receiver")
         dst = self._nodes[dst_id]
         if dst.channel != f.channel:
-            return TxOutcome(f, "fail", airtime_us, 0, [], "channel_mismatch")  # brief §3
+            return TxOutcome(f, "fail", airtime_us, 0, [], "channel_mismatch")
 
         # Encrypted unicast requires the receiver to have the sender as a peer with LMK
         # (policy-level model). We check the *destination* has a peer entry for src.
@@ -281,30 +261,18 @@ class MediumEngine:
             if dst_peer is None or dst_peer.lmk != src_peer.lmk:
                 return TxOutcome(f, "fail", airtime_us, 0, [], "encrypt_no_matching_lmk")
 
-        # Retry loop: each attempt redraws loss and costs airtime (brief §3).
-        # The DATA frame lands `ack_tail` (SIFS+ACK) before the attempt's airtime ends,
-        # so the receiver's RX time excludes the ACK tail (review BUG-3); the sender's
-        # send-cb (status_t) fires after the ACK, i.e. at full airtime.
-        total_airtime = airtime_us
-        attempts = 0
+        # Each attempt redraws loss and costs airtime. The data lands one ACK tail
+        # (SIFS + ACK) before the attempt ends; the send callback fires at its end.
         prop = self.cfg.airtime.propagation_delay_us(src.distance_to(dst))
         ack_tail = self.cfg.airtime.ack_tail_us()
-        last_v: Optional[RxVerdict] = None
-        for attempt in range(self.cfg.max_retries + 1):
-            attempts += 1
-            # Data lands: elapsed full attempts, minus this attempt's ACK tail.
-            delivery = window[0] + total_airtime - ack_tail + prop
+        for attempt in range(1, self.cfg.max_retries + 2):
             # Each retry goes out after the previous attempt, so it meets different traffic.
-            attempt_start = window[0] + total_airtime - airtime_us
-            v = self._reception(f, dst, interference.during(
-                (attempt_start, attempt_start + airtime_us)), delivery)
-            last_v = v
+            start = window[0] + (attempt - 1) * airtime_us
+            v = self._reception(f, dst, interference.during((start, start + airtime_us)),
+                                start + airtime_us - ack_tail + prop)
             if v.delivered:
-                return TxOutcome(f, "success", total_airtime, attempts, [v], "acked")
-            if attempt < self.cfg.max_retries:
-                total_airtime += airtime_us  # retransmit costs another airtime
-        return TxOutcome(f, "fail", total_airtime, attempts,
-                         [last_v] if last_v else [], "lost_on_air")
+                return TxOutcome(f, "success", attempt * airtime_us, attempt, [v], "acked")
+        return TxOutcome(f, "fail", attempt * airtime_us, attempt, [v], "lost_on_air")
 
 
 @dataclass(frozen=True)

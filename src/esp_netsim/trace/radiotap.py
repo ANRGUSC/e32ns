@@ -7,7 +7,7 @@ import struct
 
 from ..protocol import normalize_mac
 
-ESPRESSIF_OUI = bytes((0x18, 0xFE, 0x34))  # Espressif vendor OUI (brief §7)
+ESPRESSIF_OUI = bytes((0x18, 0xFE, 0x34))  # Espressif vendor OUI
 
 # radiotap "present" field bits we populate
 _RT_FLAGS = 1 << 1

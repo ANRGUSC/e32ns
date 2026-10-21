@@ -1,6 +1,6 @@
 """End-to-end tests over real TCP loopback: medium + server + barrier + mock nodes.
 
-These exercise the full vertical slice with no QEMU (D-000): protocol framing,
+These exercise the full vertical slice with no QEMU: protocol framing,
 transport, the SliceTime barrier, and ESP-NOW send/recv semantics.
 """
 
@@ -48,7 +48,7 @@ async def test_two_node_broadcast_end_to_end():
     await sim.run(duration_us=3000)
     await _drain()
 
-    # Sender got a success callback (broadcast is unacknowledged-success, brief §3).
+    # Sender got a success callback (broadcast is unacknowledged-success).
     assert n1.send_status.get(1) == "success"
     # Both other nodes received the broadcast.
     assert any(r.data == b"beacon" for r in n2.received)

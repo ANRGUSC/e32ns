@@ -1,4 +1,4 @@
-"""Node <-> Medium wire protocol codec: length-prefixed binary messages (D-002/D-003/D-019)."""
+"""Node <-> Medium wire protocol codec: length-prefixed binary messages (D-002)."""
 
 from __future__ import annotations
 
@@ -51,14 +51,6 @@ def is_broadcast(mac: str) -> bool:
     return normalize_mac(mac) == BROADCAST_MAC
 
 
-def data_to_hex(data: bytes) -> str:
-    return data.hex()
-
-
-def hex_to_data(hexstr: str) -> bytes:
-    return bytes.fromhex(hexstr) if hexstr else b""
-
-
 @dataclass(frozen=True)
 class Message:
     """A protocol message: a type tag plus a payload dict."""
@@ -73,14 +65,11 @@ class Message:
     def node(self) -> Optional[int]:
         return self.payload.get("node")
 
-    @property
-    def t(self) -> Optional[int]:
-        return self.payload.get("t")
 
 
-def hello(node: int, mac: str, espnow: bool = True, wifi: bool = False) -> Message:
+def hello(node: int, mac: str) -> Message:
     return Message(HELLO, {"node": node, "mac": normalize_mac(mac),
-                           "caps": {"espnow": espnow, "wifi": wifi}})
+                           "caps": {"espnow": True, "wifi": False}})
 
 
 def welcome(node: int, slice_us: int, mac: str) -> Message:
@@ -91,14 +80,14 @@ def add_peer(node: int, peer: str, channel: int, encrypt: bool = False,
              lmk: Optional[bytes] = None) -> Message:
     return Message(ADD_PEER, {"node": node, "peer": normalize_mac(peer),
                               "channel": channel, "encrypt": encrypt,
-                              "lmk": lmk.hex() if lmk else None})
+                              "lmk": lmk})
 
 
 def tx(node: int, t: int, src: str, dst: str, channel: int, rate_mbps: float,
        seq: int, data: bytes) -> Message:
     return Message(TX, {"node": node, "t": t, "src": normalize_mac(src),
                         "dst": normalize_mac(dst), "channel": channel,
-                        "rate_mbps": rate_mbps, "seq": seq, "data": data_to_hex(data)})
+                        "rate_mbps": rate_mbps, "seq": seq, "data": data})
 
 
 def tx_status(node: int, seq: int, status: str, t: int) -> Message:
@@ -110,7 +99,7 @@ def rx(node: int, t: int, src: str, dst: str, channel: int, rate_mbps: float,
     return Message(RX, {"node": node, "t": t, "src": normalize_mac(src),
                         "dst": normalize_mac(dst), "channel": channel,
                         "rate_mbps": rate_mbps, "rssi_dbm": rssi_dbm,
-                        "data": data_to_hex(data)})
+                        "data": data})
 
 
 def run_slice(until_t: int) -> Message:
@@ -138,10 +127,7 @@ def _mac_str(raw: bytes) -> str:
 
 def encode_body(msg: Message) -> bytes:
     t, p = msg.type, msg.payload
-    tag = _TAG.get(t)
-    if tag is None:
-        raise ValueError(f"unknown message type {t!r}")
-    out = bytearray([tag])
+    out = bytearray([_TAG[t]])
     if t == HELLO:
         caps = p.get("caps", {})
         capbits = (1 if caps.get("espnow") else 0) | (2 if caps.get("wifi") else 0)
@@ -149,14 +135,13 @@ def encode_body(msg: Message) -> bytes:
     elif t == WELCOME:
         out += struct.pack(">HI", p["node"], p["slice_us"]) + _mac_bytes(p["mac"])
     elif t == ADD_PEER:
-        lmk = hex_to_data(p["lmk"]) if p.get("lmk") else b""
-        lmk = (lmk + b"\x00" * 16)[:16]
+        lmk = ((p.get("lmk") or b"") + bytes(16))[:16]
         out += (struct.pack(">H", p["node"]) + _mac_bytes(p["peer"])
                 + bytes([p.get("channel", 0) & 0xFF, 1 if p.get("encrypt") else 0]) + lmk)
     elif t == DEL_PEER:
         out += struct.pack(">H", p["node"]) + _mac_bytes(p["peer"])
     elif t == TX:
-        data = hex_to_data(p["data"])
+        data = p["data"]
         out += (struct.pack(">HQ", p["node"], p.get("t", 0))
                 + _mac_bytes(p["src"]) + _mac_bytes(p["dst"])
                 + bytes([p["channel"] & 0xFF]) + struct.pack(">f", p["rate_mbps"])
@@ -165,7 +150,7 @@ def encode_body(msg: Message) -> bytes:
         st = 1 if p["status"] == STATUS_SUCCESS else 0
         out += struct.pack(">HI", p["node"], p["seq"]) + bytes([st]) + struct.pack(">Q", p["t"])
     elif t == RX:
-        data = hex_to_data(p["data"])
+        data = p["data"]
         out += (struct.pack(">HQ", p["node"], p.get("t", 0))
                 + _mac_bytes(p["src"]) + _mac_bytes(p["dst"])
                 + bytes([p["channel"] & 0xFF])
@@ -175,8 +160,6 @@ def encode_body(msg: Message) -> bytes:
         out += struct.pack(">Q", p["until_t"])
     elif t == SLICE_DONE:
         out += struct.pack(">HQ", p["node"], p["t"])
-    elif t == SHUTDOWN:
-        pass
     return bytes(out)
 
 
@@ -211,7 +194,7 @@ def decode_body(raw: bytes) -> Message:
         (node,) = u(">H"); peer = mac(); channel, enc = u(">BB")
         lmk = raw[o:o + 16]; o += 16
         return Message(t, {"node": node, "peer": peer, "channel": channel,
-                           "encrypt": bool(enc), "lmk": lmk.hex() if enc else None})
+                           "encrypt": bool(enc), "lmk": lmk if enc else None})
     if t == DEL_PEER:
         (node,) = u(">H"); peer = mac()
         return Message(t, {"node": node, "peer": peer})
@@ -221,7 +204,7 @@ def decode_body(raw: bytes) -> Message:
         data = raw[o:o + dlen]; o += dlen
         return Message(t, {"node": node, "t": ts, "src": src, "dst": dst,
                            "channel": channel, "rate_mbps": rate, "seq": seq,
-                           "data": data.hex()})
+                           "data": data})
     if t == TX_STATUS:
         node, seq = u(">HI"); (st,) = u(">B"); (ts,) = u(">Q")
         return Message(t, {"node": node, "seq": seq,
@@ -232,23 +215,19 @@ def decode_body(raw: bytes) -> Message:
         data = raw[o:o + dlen]; o += dlen
         return Message(t, {"node": node, "t": ts, "src": src, "dst": dst,
                            "channel": channel, "rate_mbps": rate, "rssi_dbm": rssi,
-                           "data": data.hex()})
+                           "data": data})
     if t == RUN_SLICE:
         (until_t,) = u(">Q")
         return Message(t, {"until_t": until_t})
     if t == SLICE_DONE:
         node, ts = u(">HQ")
         return Message(t, {"node": node, "t": ts})
-    if t == SHUTDOWN:
-        return Message(t, {})
-    raise ValueError(f"unhandled type {t}")  # pragma: no cover
+    return Message(t, {})  # SHUTDOWN
 
 
 def encode_frame(msg: Message) -> bytes:
     """Length-prefix a message body for the wire."""
     body = encode_body(msg)
-    if len(body) > MAX_MESSAGE_BYTES:
-        raise ValueError(f"message too large: {len(body)} bytes")
     return LENGTH_PREFIX.pack(len(body)) + body
 
 
@@ -274,7 +253,3 @@ class FrameDecoder:
             del self._buf[: start + length]
             out.append(decode_body(body))
         return out
-
-    @property
-    def pending_bytes(self) -> int:
-        return len(self._buf)

@@ -55,7 +55,7 @@ class PcapngWriter:
 
     def _write_idb(self, name: str) -> None:
         body = struct.pack("<HHI", LINKTYPE_IEEE802_11_RADIOTAP, 0, 0)  # linktype, rsvd, snaplen
-        # if_tsresol = 6 -> timestamps are in microseconds (D-005/D-016).
+        # if_tsresol = 6 -> timestamps are in microseconds.
         body += _option(_IDB_OPT_TSRESOL, bytes([6]))
         body += _option(_IDB_OPT_IFNAME, name.encode("utf-8"))
         body += _option(_OPT_ENDOFOPT, b"")

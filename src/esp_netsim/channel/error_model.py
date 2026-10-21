@@ -14,7 +14,6 @@ class ReceptionContext:
     snr_db: float
     nbytes: int
     rate_mbps: float
-    distance_m: float = 0.0
     bandwidth_hz: float = 22_000_000.0
 
 
@@ -47,31 +46,6 @@ def ber_qpsk_coherent(ebn0: float) -> float:
     return units.qfunc(math.sqrt(2.0 * ebn0))
 
 
-def ber_mqam(ebn0: float, m: int) -> float:
-    """Gray-coded square M-QAM approximate BER (M in {4,16,64}), BPSK for M<=2."""
-    if m <= 2:
-        return units.qfunc(math.sqrt(2.0 * ebn0))
-    k = math.log2(m)
-    coeff = (4.0 / k) * (1.0 - 1.0 / math.sqrt(m))
-    arg = math.sqrt(3.0 * k / (m - 1) * ebn0)
-    return min(0.5, coeff * units.qfunc(arg))
-
-
-def _modulation_for_rate(rate_mbps: float):
-    """BER function for an 802.11b/g data rate."""
-    if rate_mbps <= 1.0:
-        return ber_dbpsk
-    if rate_mbps <= 2.0:
-        return ber_qpsk_coherent
-    if rate_mbps <= 6.0:
-        return lambda e: ber_mqam(e, 2)
-    if rate_mbps <= 12.0:
-        return lambda e: ber_mqam(e, 4)
-    if rate_mbps <= 24.0:
-        return lambda e: ber_mqam(e, 16)
-    return lambda e: ber_mqam(e, 64)
-
-
 @dataclass(frozen=True)
 class SnrPerErrorModel:
     """Physical model: SNR -> per-modulation BER -> PER = 1-(1-BER)^(8*nbytes)."""
@@ -79,5 +53,7 @@ class SnrPerErrorModel:
     def per(self, ctx: ReceptionContext) -> float:
         nbits = max(1, ctx.nbytes) * 8
         ebn0 = _ebn0_linear(ctx.snr_db, ctx.rate_mbps, ctx.bandwidth_hz)
-        ber = min(max(_modulation_for_rate(ctx.rate_mbps)(ebn0), 0.0), 0.5)
+        # ESP-NOW goes at 1 Mbps (DBPSK); Wi-Fi at 11 Mbps (CCK), approximated as QPSK.
+        ber_fn = ber_dbpsk if ctx.rate_mbps <= 1.0 else ber_qpsk_coherent
+        ber = min(max(ber_fn(ebn0), 0.0), 0.5)
         return -math.expm1(nbits * math.log1p(-ber))  # stable 1-(1-BER)^nbits

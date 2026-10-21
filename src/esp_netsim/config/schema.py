@@ -1,4 +1,4 @@
-"""YAML scenario schema + fail-fast validation at the config boundary (brief §9)."""
+"""YAML scenario schema + fail-fast validation at the config boundary."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from ..protocol import normalize_mac
 from ..medium import AP_NODE_ID, MediumConfig, MediumEngine
-from ..channel.pathloss import LogDistancePropagationLoss, LinkBudget
+from ..channel.pathloss import LogDistance
 from ..channel.error_model import ConstantErrorModel, SnrPerErrorModel
 from ..channel.airtime import AirtimeModel
 
@@ -54,8 +54,7 @@ class MediumConfigSpec:
             raise ValueError(f"medium.error_model must be constant|snr_per, "
                              f"got {self.error_model!r}")
         return MediumConfig(
-            propagation=LogDistancePropagationLoss(exponent=self.path_loss_exponent),
-            link_budget=LinkBudget(tx_power_dbm=self.tx_power_dbm),
+            propagation=LogDistance(self.path_loss_exponent, self.tx_power_dbm),
             error_model=em, airtime=AirtimeModel(),
             noise_figure_db=self.noise_figure_db,
             capture_threshold_db=self.capture_threshold_db,
@@ -71,7 +70,6 @@ class TrafficConfig:
     at_us: int
     dst: str
     size_bytes: int = 16
-    rate_mbps: float = 1.0
     count: int = 1
     period_us: int = 0
 
@@ -167,7 +165,6 @@ def _parse_traffic(raw: Any, valid_ids: set) -> list:
         out.append(TrafficConfig(
             node_id=nid, at_us=int(_require(t, "at_us", ctx)), dst=dst,
             size_bytes=int(t.get("size_bytes", 16)),
-            rate_mbps=float(t.get("rate_mbps", 1.0)),
             count=int(t.get("count", 1)), period_us=int(t.get("period_us", 0))))
     return out
 

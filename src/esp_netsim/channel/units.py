@@ -22,9 +22,9 @@ def db_to_linear(db: float) -> float:
     return 10.0 ** (db / 10.0)
 
 
-def friis_reference_loss_db(freq_hz: float, d0_m: float = 1.0) -> float:
-    """Free-space (Friis) loss at d0; ~40.046 dB at 2.4 GHz/1 m, matching ns-3's 40.0459."""
-    return 20.0 * math.log10(4.0 * math.pi * d0_m * freq_hz / SPEED_OF_LIGHT)
+def friis_loss_1m_db(freq_hz: float) -> float:
+    """Free-space (Friis) loss at 1 m; ~40.046 dB at 2.4 GHz, matching ns-3's 40.0459."""
+    return 20.0 * math.log10(4.0 * math.pi * freq_hz / SPEED_OF_LIGHT)
 
 
 def thermal_noise_dbm(bandwidth_hz: float, noise_figure_db: float = 0.0) -> float:

@@ -1,4 +1,4 @@
-"""Carry a Wi-Fi station's Ethernet frames over the modeled link to the AP, then on to slirp NAT (D-030)."""
+"""Carry a Wi-Fi station's Ethernet frames over the modeled link to the AP, then on to slirp NAT (D-032)."""
 
 from __future__ import annotations
 

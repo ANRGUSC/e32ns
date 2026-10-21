@@ -1,4 +1,4 @@
-"""esp-netsim CLI: run | edit | validate | info."""
+"""esp-netsim CLI: run | edit | validate."""
 
 from __future__ import annotations
 
@@ -59,14 +59,6 @@ def _cmd_edit(args) -> int:
     return 0
 
 
-def _cmd_info(args) -> int:
-    print(f"esp-netsim {__version__}")
-    print("error models : constant | snr_per (YANS-style)")
-    print("trace format : pcapng + radiotap (LINKTYPE 127), simulation-clock us")
-    print("node kinds   : mock (built-in) | qemu (node 'firmware:' = ESP-IDF build dir)")
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="esp-netsim",
                                 description="Cooja-like network emulator for ESP32-S3.")
@@ -86,8 +78,6 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--port", type=int, default=8765)
     pe.set_defaults(func=_cmd_edit)
 
-    pi = sub.add_parser("info", help="print version and capabilities")
-    pi.set_defaults(func=_cmd_info)
     return p
 
 

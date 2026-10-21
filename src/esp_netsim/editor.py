@@ -13,7 +13,7 @@ from .config.schema import parse_scenario
 
 PAGE = Path(__file__).with_name("editor.html")
 ESPNOW_PROBE = (50, 1.0)   # bytes, Mbps: a typical ESP-NOW payload at the ESP-NOW rate
-WIFI_PROBE = (100, 11.0)   # station <-> AP at the fixed Wi-Fi rate (D-032)
+WIFI_PROBE = (100, 11.0)   # station <-> AP at the fixed Wi-Fi rate
 
 
 def predicted_links(doc: dict, base_dir: str) -> list[dict]:

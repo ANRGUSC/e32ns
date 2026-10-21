@@ -8,6 +8,7 @@ from esp_netsim.medium import MediumEngine, MediumConfig
 from esp_netsim.channel.error_model import ConstantErrorModel
 from esp_netsim.orchestrator.simulation import Simulation
 from esp_netsim.nodes.mock_node import MockNode
+from esp_netsim import protocol
 from esp_netsim.protocol import BROADCAST_MAC
 
 pytestmark = pytest.mark.asyncio
@@ -108,3 +109,16 @@ async def test_rx_is_held_until_its_computed_delivery_time():
     await sim.stop()
     for n in (a, b):
         await n.close()
+
+
+async def test_stale_slice_done_does_not_release_the_barrier():
+    eng = MediumEngine(MediumConfig())
+    eng.add_node(1, MAC1)
+    eng.add_node(2, MAC2)
+    sim = Simulation(eng, slice_us=1000)
+    sim._expected, sim._done, sim._current_until_us = {1, 2}, set(), 1000
+    await sim._on_message(1, protocol.slice_done(1, 500), None)
+    assert not sim._barrier.is_set()
+    await sim._on_message(1, protocol.slice_done(1, 1000), None)
+    await sim._on_message(2, protocol.slice_done(2, 1000), None)
+    assert sim._barrier.is_set()

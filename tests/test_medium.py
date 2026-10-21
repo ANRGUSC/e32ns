@@ -1,6 +1,7 @@
 """Tests for the RadioMedium engine (medium.py): ESP-NOW semantics + collision."""
 
 from esp_netsim.medium import MediumEngine, MediumConfig, Frame
+from esp_netsim.channel.airtime import AirtimeModel
 from esp_netsim.channel.error_model import ConstantErrorModel
 from esp_netsim.protocol import BROADCAST_MAC
 
@@ -19,7 +20,7 @@ def frame(src_node, src_mac, dst_mac, payload=b"hello", start=0, ch=1, rate=1.0,
     return Frame(src_node, src_mac, dst_mac, ch, rate, seq, payload, start)
 
 
-# ---- unicast send-callback semantics (brief §3, D-012) ---------------------
+# ---- unicast send-callback semantics ---------------------
 
 def test_unicast_success_when_deliverable():
     eng = make_engine()
@@ -67,7 +68,7 @@ def test_unicast_fail_lost_on_air_uses_retries():
     assert out.attempts == 4  # 1 + 3 retries
 
 
-# ---- broadcast semantics (brief §3, D-012) ---------------------------------
+# ---- broadcast semantics ---------------------------------
 
 def test_broadcast_success_and_multi_receiver():
     eng = make_engine()
@@ -90,7 +91,7 @@ def test_broadcast_skips_other_channel():
     assert delivered_ids == {2}
 
 
-# ---- encryption policy (brief §3, D-012) -----------------------------------
+# ---- encryption policy -----------------------------------
 
 def test_encrypted_unicast_requires_matching_lmk():
     eng = make_engine()
@@ -107,7 +108,7 @@ def test_encrypted_unicast_requires_matching_lmk():
     assert out2.status == "success"
 
 
-# ---- collision / SINR (brief §5, D-009/D-013) ------------------------------
+# ---- collision / SINR ------------------------------
 
 def test_hidden_terminals_collide_at_shared_receiver():
     # 140 m apart the senders cannot hear each other (-84 dBm < -82 dBm CCA), so both
@@ -163,7 +164,7 @@ def test_non_overlapping_transmissions_do_not_collide():
         assert v3.delivered  # no interference -> delivered
 
 
-# ---- determinism (D-011) ---------------------------------------------------
+# ---- determinism ---------------------------------------------------
 
 def test_determinism_same_seed_same_result():
     def run():
@@ -176,3 +177,23 @@ def test_determinism_same_seed_same_result():
         return [eng.transmit(frame(1, MAC1, MAC2, seq=i, start=i * 5000)).status
                 for i in range(20)]
     assert run() == run()
+
+
+def test_frame_rejected_before_transmission_does_not_interfere():
+    eng = make_engine(capture_threshold_db=6.0)
+    eng.add_node(1, MAC1, x=-10, y=0)
+    eng.add_node(2, MAC2, x=10, y=0)
+    eng.add_node(3, MAC3, x=0, y=0)
+    eng.add_node(4, "aa:bb:cc:00:00:09", x=50, y=0, channel=6)
+    rejected = eng.transmit(frame(1, MAC1, "aa:bb:cc:00:00:09"))
+    assert (rejected.reason, rejected.attempts) == ("channel_mismatch", 0)
+    out = eng.transmit(frame(2, MAC2, BROADCAST_MAC))  # same start time
+    assert [r.reason for r in out.receivers if r.node_id == 3] == ["ok"]
+
+
+def test_unicast_rx_lands_before_the_ack_tail():
+    eng = make_engine()
+    eng.add_node(1, MAC1, x=0, y=0)
+    eng.add_node(2, MAC2, x=1, y=0)
+    out = eng.transmit(frame(1, MAC1, MAC2))
+    assert out.receivers[0].delivery_us == out.airtime_us - AirtimeModel().ack_tail_us()

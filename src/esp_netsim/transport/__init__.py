@@ -1,1 +1,1 @@
-"""TCP transport carrying the wire protocol (D-003)."""
+"""TCP transport carrying the wire protocol."""

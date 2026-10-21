@@ -1,4 +1,4 @@
-"""MockNode: a pure-Python virtual ESP32 node speaking the wire protocol (D-000/D-015)."""
+"""MockNode: a pure-Python virtual ESP32 node speaking the wire protocol (D-015)."""
 
 from __future__ import annotations
 
@@ -15,9 +15,7 @@ class ScheduledTx:
     t_us: int
     dst_mac: str
     payload: bytes
-    rate_mbps: float = 1.0
-    seq: int = 0
-    channel: int = 1
+    seq: int
     sent: bool = False
 
 
@@ -52,17 +50,10 @@ class MockNode:
         self.send_status: dict[int, str] = {}      # seq -> "success"/"fail"
         self._running = True
 
-    # ---- scripting ----------------------------------------------------------
-    def schedule_tx(self, t_us: int, dst_mac: str, payload: bytes,
-                    rate_mbps: float = 1.0, seq: Optional[int] = None,
-                    channel: Optional[int] = None) -> int:
-        seq = seq if seq is not None else len(self.schedule) + 1
-        self.schedule.append(ScheduledTx(
-            t_us=t_us, dst_mac=protocol.normalize_mac(dst_mac), payload=payload,
-            rate_mbps=rate_mbps, seq=seq, channel=channel or self.channel))
-        return seq
+    def schedule_tx(self, t_us: int, dst_mac: str, payload: bytes, seq: int) -> None:
+        """Queue a 1 Mbps ESP-NOW frame on this node's channel for virtual time t_us."""
+        self.schedule.append(ScheduledTx(t_us, protocol.normalize_mac(dst_mac), payload, seq))
 
-    # ---- connection ---------------------------------------------------------
     async def connect(self) -> None:
         self._reader, self._writer = await asyncio.open_connection("127.0.0.1", self.port)
         self._reader_task = asyncio.create_task(self._read_loop())
@@ -80,7 +71,6 @@ class MockNode:
         self._writer.write(encode_frame(msg))
         await self._writer.drain()
 
-    # ---- main receive loop --------------------------------------------------
     async def _read_loop(self) -> None:
         try:
             while self._running:
@@ -102,7 +92,7 @@ class MockNode:
         elif msg.type == protocol.RX:
             self.received.append(ReceivedFrame(
                 t_us=msg.get("t"), src_mac=msg.get("src"), dst_mac=msg.get("dst"),
-                rssi_dbm=msg.get("rssi_dbm"), data=protocol.hex_to_data(msg.get("data"))))
+                rssi_dbm=msg.get("rssi_dbm"), data=msg.get("data")))
         elif msg.type == protocol.SHUTDOWN:
             await self.close()
 
@@ -111,8 +101,8 @@ class MockNode:
         for tx in self.schedule:
             if not tx.sent and tx.t_us < until_t:
                 await self._send(protocol.tx(
-                    self.node_id, tx.t_us, self.mac, tx.dst_mac, tx.channel,
-                    tx.rate_mbps, tx.seq, tx.payload))
+                    self.node_id, tx.t_us, self.mac, tx.dst_mac, self.channel,
+                    1.0, tx.seq, tx.payload))
                 tx.sent = True
 
     async def _run_slice(self, until_t: int) -> None:

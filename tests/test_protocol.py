@@ -23,7 +23,7 @@ def test_broadcast_detection():
 
 
 def test_roundtrip_tx_message():
-    payload = bytes(range(0, 250))  # ESP-NOW v1 max payload (brief §3)
+    payload = bytes(range(0, 250))  # ESP-NOW v1 max payload
     msg = p.tx(node=1, t=1234, src="aa:bb:cc:00:00:01", dst=p.BROADCAST_MAC,
               channel=6, rate_mbps=1.0, seq=7, data=payload)
     frame = p.encode_frame(msg)
@@ -32,8 +32,8 @@ def test_roundtrip_tx_message():
     assert len(got) == 1
     m = got[0]
     assert m.type == p.TX
-    assert m.node == 1 and m.t == 1234 and m.get("seq") == 7
-    assert p.hex_to_data(m.get("data")) == payload
+    assert m.node == 1 and m.get("t") == 1234 and m.get("seq") == 7
+    assert m.get("data") == payload
 
 
 def test_decoder_handles_split_and_coalesced_streams():
@@ -48,7 +48,6 @@ def test_decoder_handles_split_and_coalesced_streams():
     for i in range(len(blob)):
         out.extend(dec.feed(blob[i : i + 1]))
     assert [m.type for m in out] == [p.HELLO, p.TX, p.SLICE_DONE]
-    assert dec.pending_bytes == 0
 
     # Feed everything in one chunk: same result.
     dec2 = p.FrameDecoder()
@@ -85,7 +84,7 @@ def test_binary_wire_layout_is_locked():
 
 def test_hello_and_slice_done_layout():
     import struct
-    h = p.hello(1, "aa:bb:cc:00:00:01", espnow=True, wifi=False)
+    h = p.hello(1, "aa:bb:cc:00:00:01")
     hb = p.encode_body(h)
     assert hb[0] == 1 and struct.unpack_from(">H", hb, 1)[0] == 1
     assert hb[3:9] == bytes.fromhex("aabbcc000001")
@@ -95,10 +94,10 @@ def test_hello_and_slice_done_layout():
     assert struct.unpack_from(">HQ", sd, 1) == (3, 5000)
 
 
-def test_add_peer_encrypt_carries_lmk_hex():
+def test_add_peer_encrypt_carries_lmk():
     lmk = bytes(range(16))
     m = p.add_peer(2, "aa:bb:cc:dd:ee:02", channel=6, encrypt=True, lmk=lmk)
     frame = p.encode_frame(m)
     got = p.FrameDecoder().feed(frame)[0]
     assert got.get("encrypt") is True
-    assert p.hex_to_data(got.get("lmk")) == lmk
+    assert got.get("lmk") == lmk

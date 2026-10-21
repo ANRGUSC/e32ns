@@ -96,18 +96,16 @@ class Simulation:
                                              self.engine.node(msg.node).mac))
         elif msg.type == protocol.ADD_PEER:
             self.engine.add_peer(msg.node, msg.get("peer"), msg.get("channel", 0),
-                                 msg.get("encrypt", False),
-                                 protocol.hex_to_data(msg.get("lmk")) if msg.get("lmk")
-                                 else None)
+                                 msg.get("encrypt", False), msg.get("lmk"))
         elif msg.type == protocol.TX:
             self._slice_frames.append(Frame(
                 src_node=msg.node, src_mac=msg.get("src"), dst_mac=msg.get("dst"),
                 channel=msg.get("channel"), rate_mbps=msg.get("rate_mbps", 1.0),
-                seq=msg.get("seq"), payload=protocol.hex_to_data(msg.get("data")),
+                seq=msg.get("seq"), payload=msg.get("data"),
                 start_us=self._start_time(msg)))
             self._slice_sinks.append(None)
         elif msg.type == protocol.SLICE_DONE:
-            # A stale ack from an earlier slice must not release this barrier (review BUG-2).
+            # A stale ack from an earlier slice must not release this barrier.
             if msg.get("t") == self._current_until_us:
                 self._done.add(msg.node)
                 if self._expected and self._done >= self._expected:

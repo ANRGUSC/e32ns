@@ -48,7 +48,7 @@ def _mock_nodes(scenario: ScenarioConfig, port: int) -> dict[int, MockNode]:
             nodes[tc.node_id].schedule_tx(
                 t_us=tc.at_us + k * tc.period_us, dst_mac=tc.dst,
                 payload=bytes((seq[tc.node_id] & 0xFF,)) * tc.size_bytes,
-                rate_mbps=tc.rate_mbps, seq=seq[tc.node_id])
+                seq=seq[tc.node_id])
     return nodes
 
 

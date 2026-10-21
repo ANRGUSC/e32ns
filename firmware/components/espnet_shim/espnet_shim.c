@@ -1,8 +1,8 @@
 /*
  * espnet_shim: redirects esp_now_* and the Wi-Fi bring-up calls an ESP-NOW app makes to the
- * host medium, so an unmodified hardware app runs under QEMU (D-021, D-028).
+ * host medium, so an unmodified hardware app runs under QEMU (D-028).
  *
- * Linked via -Wl,--wrap (component-provided symbols lose to IDF's archive, D-021). Node
+ * Linked via -Wl,--wrap (component-provided symbols lose to IDF's archive). Node
  * identity comes from the NVS namespace "espnet", written per node by the host launcher.
  * Wire layout mirrors src/esp_netsim/protocol.py: big-endian, 4-byte length prefix.
  */
@@ -110,7 +110,7 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data) 
     esp_event_post(IP_EVENT, IP_EVENT_STA_GOT_IP, data, sizeof(ip_event_got_ip_t), 0);
 }
 
-/* ESP-NOW control traffic and Wi-Fi traffic both ride QEMU's open_eth NIC (D-028, D-030). */
+/* ESP-NOW control traffic and Wi-Fi traffic both ride QEMU's open_eth NIC. */
 static void ethernet_init(void) {
     if (s_netif) return;
     esp_err_t err = esp_netif_init();
@@ -229,7 +229,7 @@ esp_err_t __wrap_esp_now_send(const uint8_t *peer_addr, const uint8_t *data, siz
     static const uint8_t BCAST[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     if (len > ESP_NOW_MAX_DATA_LEN) return ESP_ERR_ESPNOW_ARG;
     tx_msg_t m = { .tag = T_TX, .node = __builtin_bswap16(s_id.node_id),
-                   .t = __builtin_bswap64((uint64_t)esp_timer_get_time()),  /* D-022 */
+                   .t = __builtin_bswap64((uint64_t)esp_timer_get_time()),
                    .channel = s_id.channel, .rate = f32_be(1.0f),
                    .seq = __builtin_bswap32(++s_seq), .len = __builtin_bswap16((uint16_t)len) };
     memcpy(m.src, s_id.mac, 6);

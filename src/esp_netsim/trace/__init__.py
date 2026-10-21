@@ -1,1 +1,1 @@
-"""pcapng + radiotap trace writing (D-016)."""
+"""pcapng + radiotap trace writing."""
