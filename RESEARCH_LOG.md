@@ -1378,13 +1378,16 @@ next batch as before (D-029). This supersedes D-029's finding that `slice_us` be
 floor does not matter: the floor was the sleep.
 
 **Result.** Effective quantum 2.0 → 0.85 ms (2 nodes), 2.2 → 1.26 ms (6), 1.16 ms on
-`m3_espnow_line`. With two nodes, `slice_us` 100 and 20 give 0.60 and 0.52 ms at nearly the
-same wall time per virtual second; ~0.5 ms is now the QMP round trips. On `hw_ab` (V-016) the
-emulator's mean RTT minus the boards' went from +2.7 / +1.0 / +2.2 ms to +1.1 / +1.4 / +0.9 ms
-at 13 / 128 / 250 bytes, and RTT now grows 15.6 µs per byte against the boards' 16.3, so the
-emulator resolves payload size. At `slice_us: 100` (quantum 0.99 ms) the 13-byte median is
-unchanged (4.58 against 4.39 ms), so the remaining ~1 ms is not the quantum. Likely the
-shim's transport (each TX and RX crosses lwIP and slirp while the guest runs); not yet measured.
+`m3_espnow_line`. On `hw_ab` (V-016) the emulator's mean RTT minus the boards' went from
++2.7 / +1.0 / +2.2 ms to +1.1 / +1.4 / +0.9 ms at 13 / 128 / 250 bytes, and RTT now grows
+15.6 µs per byte against the boards' 16.3, so the emulator resolves payload size. With only
+the 13-byte pair (2 nodes, 40 s) the median is 3.73 ms against the boards' 3.11, +0.6 ms.
+
+Smaller slices do not help. With two nodes, `slice_us` 100 and 20 cut the quantum to 0.60 and
+0.52 ms (the QMP round trips are now the floor), but the 2-node median RTT at `slice_us: 20`
+was 4.80 ms against 3.73 at 250. More stop/cont cycles per virtual second cost the guest time
+somewhere, perhaps in the shim's TCP over slirp; not measured. Scenarios stay at 250 µs. One
+run per setting, so differences under ~0.2 ms are not resolved.
 62 tests pass on three consecutive runs, the wall-clock-sensitive barrier test included.
 
 ---
@@ -1399,8 +1402,8 @@ shim's transport (each TX and RX crosses lwIP and slirp while the guest runs); n
   one run in three, before and after D-034.
 - Hardware: send-callback timing and retry count on two boards (V-014, V-015); A/B RTT vs
   payload on two boards together (V-016). PDR vs distance needs the boards moved apart.
-- Limits: timing quantized to 0.85–1.3 ms of virtual time (D-035); RTT reads ~1 ms high
-  against boards for a reason not yet measured (D-035); no 802.11 association frames (D-032).
+- Limits: timing quantized to 0.85–1.3 ms of virtual time; RTT reads 0.6 ms (2 nodes) to
+  ~1 ms (6 nodes) high against boards (D-035); no 802.11 association frames (D-032).
 
 ---
 
@@ -1485,8 +1488,8 @@ uses the slice of arrival (D-029).
 | M6 | GUI: nodes, links, packets, console | done as a replay page | `out/<name>/report.html` (D-033) |
 
 **Next, in order.**
-1. Find the ~1 ms RTT excess left after D-035 (timestamp the shim's TX and RX path in the
-   guest). Below that, `-icount` or a run-to-next-event barrier for the ~0.5 ms QMP floor.
+1. Find why RTT rises as slices shrink (D-035): timestamp the shim's TX and RX path in the
+   guest. Then `-icount` or a run-to-next-event barrier for the ~0.5 ms QMP floor.
 2. PDR vs distance on boards moved apart (Appendix E); RTT vs payload is done (V-016).
 3. 802.11 association frames and station-to-station traffic through one shared AP.
 4. A live (not replay) view, and topology editing in the GUI (PDF: "configuring topology").
