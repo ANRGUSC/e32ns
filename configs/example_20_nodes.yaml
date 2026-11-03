@@ -1,6 +1,7 @@
 # The project brief's example workflow: 20 virtual ESP32-S3 nodes on a 4 x 5 grid, 100 m apart.
 # Firmware A (ping) on nodes 1-10, firmware B (pong) on 11-18, and firmware C on 19-20,
-# which join the AP and reach the real Internet. ESP-NOW connectivity follows from range.
+# which join the AP and reach the real Internet. ESP-NOW connectivity follows from range,
+# except on the pairs under links:, where the user sets RSSI or loss directly.
 name: example_20_nodes
 
 wifi_ap: { pos: [150, 350], channel: 1 }
@@ -26,6 +27,11 @@ nodes:
   - { id: 18, mac: "aa:bb:cc:00:00:12", pos: [100, 400], firmware: ../firmware/examples/espnow_pong/build }
   - { id: 19, mac: "aa:bb:cc:00:00:13", pos: [200, 400], wifi: true, firmware: ../firmware/examples/wifi_http/build }
   - { id: 20, mac: "aa:bb:cc:00:00:14", pos: [300, 400], wifi: true, firmware: ../firmware/examples/wifi_http/build }
+
+links:
+  - { a: 1, b: 13, rssi_dbm: -75 }     # line of sight down the column: 1 reaches a pong 300 m away
+  - { a: 10, b: 11, rssi_dbm: -120 }   # a wall between neighbours 100 m apart
+  - { a: 20, b: 0, loss: 0.3 }         # station 20's AP link drops 30 % of attempts
 
 medium:
   error_model: snr_per

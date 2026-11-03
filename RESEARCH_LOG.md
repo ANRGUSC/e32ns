@@ -821,6 +821,47 @@ Open, not changed: the shim sends `DEL_PEER` and the medium accepts and ignores 
 
 ---
 
+## D-038 — Per-link quality in the scenario
+
+**Context.** The PDF's workflow has the user specify "an ESP-NOW topology between the nodes" and
+"link qualities such as RSSI, packet loss, or distance"; component 4 asks for configurable link
+quality. Until now only distance was settable per pair; loss was one global rate.
+
+**Decision.** An optional `links:` list, each entry `{a, b, rssi_dbm?, loss?}`, symmetric, ids
+from the scenario (0 is the AP). `rssi_dbm` replaces the path-loss value for that pair everywhere
+the medium uses received power: the wanted signal, interference at the other end, and carrier
+sense. So `-120` is a wall: no delivery, no collision, no deferral. `loss` is an extra
+per-attempt drop drawn after the channel's own SNR loss, reported as `link_loss`; unicast retries
+redraw it. Unlisted pairs follow distance as before. Like Cooja's DGRM, but over the physical
+model rather than instead of it, so a partly overridden topology still collides and defers.
+The editor gains a panel to set or clear an override for a pair; overridden pairs are marked.
+
+**Scope.** Symmetric only; an asymmetric link would need a directed key and nothing asks for it.
+
+**Checked.** 8 new tests (70 total): RSSI override both ways, loss compounding with retries, config
+validation, editor round-trip. The `loss` draw happens only on overridden pairs, and
+`two_node` and `multi_node_espnow` give byte-identical `results.json` and `trace.pcapng` before
+and after. In Chrome: a wall removes 1–2 from the prediction, `loss: 0.5` shows `*2–3 … 50 %`.
+
+---
+
+## V-017 — The 20-node workflow with link overrides
+
+`configs/example_20_nodes.yaml` now sets three pairs: 1–13 at −75 dBm (300 m apart, out of range
+by distance), a wall between neighbours 10 and 11, and 30 % extra loss on station 20's AP link.
+20 QEMU nodes, 5 s virtual in 22 s wall, 806 transmissions.
+
+| pair | result |
+|---|---|
+| 1–13 | 58 of 58 frames delivered at −75 dBm; node 1 logs 28 RTTs (none in V-013) |
+| 10–11 | 0 delivered (22 below sensitivity, 6 collisions counted at −120 dBm) |
+| 20–AP | 35 frames, 20 needed retries (up to 5 attempts), all delivered; HTTP 200 continues |
+
+The collisions on 10–11 are frames 11 could not have received anyway: the receiver's verdict
+lists every interferer even when the wanted signal is a wall.
+
+---
+
 # PART II — Current-state reference
 
 ## Appendix A — Architecture
@@ -899,11 +940,12 @@ uses the slice of arrival (D-029).
 | M5 | Config file launches all nodes, collects results | done | `esp-netsim run` (D-033) |
 | M6 | GUI: nodes, links, packets, console | done as a replay page | `out/<name>/report.html` (D-033) |
 | — | GUI topology editing (brief: "configuring topology") | done | `esp-netsim edit` (D-036) |
+| — | Per-link RSSI and loss (brief: "link qualities such as RSSI, packet loss, or distance") | done | `links:` in `example_20_nodes` (D-038, V-017) |
 
 Scenarios with firmware: `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`,
 `hw_txprobe`, `hw_ab`; mock-only: `two_node`, `multi_node_espnow`.
 
-Tests: 62 (medium, barrier, wire codec, config, trace, Wi-Fi bridge, editor, runner end to end).
+Tests: 70 (medium, barrier, wire codec, config, trace, Wi-Fi bridge, editor, runner end to end).
 `test_mixed_barrier_qemu_sender_to_mock_receiver` is wall-clock sensitive; it failed about one
 run in three around D-034 and passed three consecutive runs after D-035.
 

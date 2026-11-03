@@ -52,6 +52,19 @@ def test_links_follow_distance(editor):
     assert not any(3 in p for p in pairs)  # 5 km away hears nobody
 
 
+def test_link_override_reaches_prediction_and_file(editor):
+    path, url = editor
+    doc = yaml.safe_load(SCENARIO)
+    doc["links"] = [{"a": 1, "b": 2, "rssi_dbm": -120}]
+    status, body = _post(url + "/links", doc)
+    assert status == 200 and not any({l["a"], l["b"]} == {1, 2} for l in body["links"])
+    doc["links"] = [{"a": 1, "b": 2, "loss": 0.5}]
+    status, body = _post(url + "/save", doc)
+    (l12,) = [l for l in body["links"] if {l["a"], l["b"]} == {1, 2}]
+    assert l12["set"] and l12["pdr"] <= 0.5
+    assert load_scenario(str(path)).links[0].loss == 0.5
+
+
 def test_save_moves_node_and_keeps_header_and_other_sections(editor):
     path, url = editor
     doc = yaml.safe_load(SCENARIO)

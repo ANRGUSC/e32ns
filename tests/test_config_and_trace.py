@@ -53,6 +53,27 @@ def test_parse_rejects_missing_nodes():
         parse_scenario({"name": "x"})
 
 
+def test_parse_links_override_the_medium():
+    doc = _valid_doc()
+    doc["links"] = [{"a": 2, "b": 1, "rssi_dbm": -80, "loss": 0.25}]
+    engine = parse_scenario(doc).build_engine()
+    rssi, per = engine.link_quality(1, 2, 50, 1.0)
+    assert rssi == -80.0 and per >= 0.25
+
+
+@pytest.mark.parametrize("link, msg", [
+    ({"a": 1, "b": 9, "loss": 0.1}, "node 9"),
+    ({"a": 1, "b": 1, "loss": 0.1}, "itself"),
+    ({"a": 1, "b": 2, "loss": 1.5}, "loss"),
+    ({"a": 1, "b": 2}, "rssi_dbm or loss"),
+])
+def test_parse_rejects_bad_links(link, msg):
+    doc = _valid_doc()
+    doc["links"] = [link]
+    with pytest.raises(ValueError, match=msg):
+        parse_scenario(doc)
+
+
 def test_load_scenario_from_file(tmp_path):
     p = tmp_path / "s.yaml"
     p.write_text(

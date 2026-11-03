@@ -64,6 +64,9 @@ nodes:
   - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0, 0],  channel: 6, firmware: ../firmware/examples/espnow_ping/build }
   - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [60, 0], channel: 6, firmware: ../firmware/examples/espnow_pong/build }
   - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [20, 5], channel: 6, firmware: ../firmware/examples/wifi_http/build, wifi: true }
+links:                                          # optional: per-pair quality, both directions
+  - { a: 1, b: 2, rssi_dbm: -70 }                 # fixed RSSI instead of the distance model
+  - { a: 3, b: 0, loss: 0.2 }                     # extra per-attempt loss; 0 is the access point
 medium:
   error_model: snr_per        # or: constant, with packet_error_rate
 run:
@@ -74,10 +77,12 @@ run:
 
 `firmware` is an ESP-IDF build directory, relative to the scenario file. A node without
 `firmware` is a mock node driven by the scenario's `traffic` list (see `configs/two_node.yaml`).
+Link quality comes from distance unless a pair is listed under `links`; `rssi_dbm: -120` cuts a
+link entirely.
 
 To place nodes on a map instead, run `esp-netsim edit configs/my_experiment.yaml` and open the
-printed URL. Drag nodes, add or delete them, change firmware and medium settings; each link shows
-the RSSI and delivery the medium predicts for it. Save validates the scenario and rewrites the
+printed URL. Drag nodes, add or delete them, change firmware and medium settings, and override a pair's
+RSSI or loss; each link shows the RSSI and delivery the medium predicts for it. Save validates the scenario and rewrites the
 file, keeping its leading comment block (comments further down are not kept).
 
 ## What a run produces (`out/<name>/`)

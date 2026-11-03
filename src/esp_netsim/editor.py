@@ -24,11 +24,12 @@ def predicted_links(doc: dict, base_dir: str) -> list[dict]:
              for a, b in combinations(sc.nodes, 2) if a.channel == b.channel]
     if sc.ap:
         pairs += [(n.node_id, sc.ap.node_id, WIFI_PROBE, True) for n in sc.nodes if n.wifi]
+    overridden = {frozenset((l.a, l.b)) for l in sc.links}
     links = []
     for a, b, (nbytes, rate), wifi in pairs:
         rssi, per = engine.link_quality(a, b, nbytes, rate)
         if per < 0.995:
-            links.append({"a": a, "b": b, "wifi": wifi,
+            links.append({"a": a, "b": b, "wifi": wifi, "set": frozenset((a, b)) in overridden,
                           "rssi_dbm": round(rssi, 1), "pdr": round(1.0 - per, 3)})
     return links
 

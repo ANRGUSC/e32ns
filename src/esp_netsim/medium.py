@@ -41,6 +41,16 @@ class NodeState:
 
 
 @dataclass(frozen=True)
+class Link:
+    """A user override for the pair a-b, both directions: fixed RSSI and/or extra loss."""
+
+    a: int
+    b: int
+    rssi_dbm: Optional[float] = None    # replaces path loss, so it also sets interference and CCA
+    loss: float = 0.0                   # per-attempt drop probability on top of the channel's
+
+
+@dataclass(frozen=True)
 class Frame:
     src_node: int
     src_mac: str
@@ -106,6 +116,7 @@ class MediumEngine:
         self._nodes: dict[int, NodeState] = {}
         self._by_mac: dict[str, int] = {}
         self._in_flight: list[_InFlight] = []
+        self._links: dict[frozenset, Link] = {}
 
     def add_node(self, node_id: int, mac: str, x: float = 0.0, y: float = 0.0,
                  z: float = 0.0, channel: int = 1, espnow: bool = True) -> NodeState:
@@ -122,6 +133,9 @@ class MediumEngine:
         peers = dict(node.peers)
         peers[peer_mac] = PeerInfo(peer_mac, channel, encrypt, lmk)
         self._nodes[node_id] = replace(node, peers=peers)
+
+    def set_link(self, link: Link) -> None:
+        self._links[frozenset((link.a, link.b))] = link
 
     def node(self, node_id: int) -> NodeState:
         return self._nodes[node_id]
@@ -161,7 +175,8 @@ class MediumEngine:
                      rate_mbps: float) -> tuple[float, float]:
         """Mean RSSI and packet error rate of one attempt on a link with no interference."""
         rssi = self._rx_power(self._nodes[src_id], self._nodes[dst_id])
-        return rssi, self._per(self._sinr_db(rssi, []), nbytes, rate_mbps)
+        per = self._per(self._sinr_db(rssi, []), nbytes, rate_mbps)
+        return rssi, 1.0 - (1.0 - per) * (1.0 - self._link_loss(src_id, dst_id))
 
     def _carrier_sense(self, frames: list[Frame], airtimes: dict[int, int]) -> list[Frame]:
         """Delay each frame past any earlier same-channel frame its sender can hear (DCF deferral)."""
@@ -186,7 +201,14 @@ class MediumEngine:
         self._in_flight = [i for i in self._in_flight if i.end_us > now_us]
 
     def _rx_power(self, src: NodeState, dst: NodeState) -> float:
+        link = self._links.get(frozenset((src.node_id, dst.node_id)))
+        if link and link.rssi_dbm is not None:
+            return link.rssi_dbm
         return self.cfg.propagation.rx_power_dbm(src.distance_to(dst))
+
+    def _link_loss(self, a: int, b: int) -> float:
+        link = self._links.get(frozenset((a, b)))
+        return link.loss if link else 0.0
 
     def _per(self, sinr_db: float, nbytes: int, rate_mbps: float) -> float:
         if sinr_db < self.cfg.capture_threshold_db:
@@ -212,10 +234,15 @@ class MediumEngine:
             return RxVerdict(receiver.node_id, False, wanted_dbm, sinr, 1.0,
                              reason, delivery_us)
         per = self._per(sinr, len(f.payload), f.rate_mbps)
-        delivered = self._rng.random() >= per
-        reason = "ok" if delivered else "snr_loss"
-        return RxVerdict(receiver.node_id, delivered, wanted_dbm, sinr, per, reason,
-                         delivery_us)
+        loss = self._link_loss(f.src_node, receiver.node_id)
+        if self._rng.random() < per:
+            reason = "snr_loss"
+        elif loss and self._rng.random() < loss:  # no draw without a link: seeded runs unchanged
+            reason = "link_loss"
+        else:
+            reason = "ok"
+        return RxVerdict(receiver.node_id, reason == "ok", wanted_dbm, sinr,
+                         1.0 - (1.0 - per) * (1.0 - loss), reason, delivery_us)
 
     def _evaluate_frame(self, f: Frame, airtime_us: int,
                         window: tuple[int, int], interference: "_Interference") -> TxOutcome:

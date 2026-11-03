@@ -1,6 +1,6 @@
 """Tests for the RadioMedium engine (medium.py): ESP-NOW semantics + collision."""
 
-from esp_netsim.medium import MediumEngine, MediumConfig, Frame
+from esp_netsim.medium import MediumEngine, MediumConfig, Frame, Link
 from esp_netsim.channel.airtime import AirtimeModel
 from esp_netsim.channel.error_model import ConstantErrorModel
 from esp_netsim.protocol import BROADCAST_MAC
@@ -197,3 +197,28 @@ def test_unicast_rx_lands_before_the_ack_tail():
     eng.add_node(2, MAC2, x=1, y=0)
     out = eng.transmit(frame(1, MAC1, MAC2))
     assert out.receivers[0].delivery_us == out.airtime_us - AirtimeModel().ack_tail_us()
+
+
+# ---- per-link overrides ----------------------------------------------------
+
+def test_link_rssi_override_replaces_distance_both_ways():
+    eng = make_engine()
+    eng.add_node(1, MAC1, x=0)
+    eng.add_node(2, MAC2, x=1)
+    eng.add_node(3, MAC3, x=2)
+    eng.set_link(Link(1, 2, rssi_dbm=-100.0))   # a wall between 1 and 2
+    out = eng.transmit(frame(1, MAC1, BROADCAST_MAC))
+    by_node = {r.node_id: r for r in out.receivers}
+    assert (by_node[2].rssi_dbm, by_node[2].reason) == (-100.0, "below_sensitivity")
+    assert by_node[3].delivered
+    assert eng.link_quality(2, 1, 50, 1.0) == (-100.0, 1.0)
+
+
+def test_link_loss_compounds_with_the_channel():
+    eng = make_engine(max_retries=4)
+    eng.add_node(1, MAC1, x=0)
+    eng.add_node(2, MAC2, x=1)
+    eng.set_link(Link(1, 2, loss=1.0))
+    out = eng.transmit(frame(1, MAC1, MAC2))
+    assert (out.status, out.attempts, out.receivers[0].reason) == ("fail", 5, "link_loss")
+    assert eng.link_quality(1, 2, 50, 1.0)[1] == 1.0

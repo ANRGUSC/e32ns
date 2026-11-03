@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ..protocol import normalize_mac
-from ..medium import AP_NODE_ID, MediumConfig, MediumEngine
+from ..medium import AP_NODE_ID, Link, MediumConfig, MediumEngine
 from ..channel.pathloss import LogDistance
 from ..channel.error_model import ConstantErrorModel, SnrPerErrorModel
 from ..channel.airtime import AirtimeModel
@@ -86,6 +86,7 @@ class ScenarioConfig:
     port: int = 0
     traffic: tuple = ()
     ap: Optional[AccessPoint] = None
+    links: tuple = ()
 
     def build_engine(self) -> MediumEngine:
         engine = MediumEngine(self.medium.build(self.seed))
@@ -94,6 +95,8 @@ class ScenarioConfig:
         if self.ap:
             engine.add_node(self.ap.node_id, self.ap.mac, self.ap.x, self.ap.y,
                             channel=self.ap.channel, espnow=False)
+        for link in self.links:
+            engine.set_link(link)
         return engine
 
 
@@ -130,6 +133,8 @@ def parse_scenario(doc: dict, base_dir: str = ".") -> ScenarioConfig:
         traffic=tuple(_parse_traffic(doc.get("traffic", []),
                                      {n.node_id for n in nodes if n.firmware is None})),
         ap=ap,
+        links=tuple(_parse_links(doc.get("links", []),
+                                 {n.node_id for n in nodes} | ({ap.node_id} if ap else set()))),
     )
 
 
@@ -166,6 +171,28 @@ def _parse_traffic(raw: Any, valid_ids: set) -> list:
             node_id=nid, at_us=int(_require(t, "at_us", ctx)), dst=dst,
             size_bytes=int(t.get("size_bytes", 16)),
             count=int(t.get("count", 1)), period_us=int(t.get("period_us", 0))))
+    return out
+
+
+def _parse_links(raw: Any, valid_ids: set) -> list:
+    if not isinstance(raw, list):
+        raise ValueError("scenario.links must be a list")
+    out = []
+    for i, rl in enumerate(raw):
+        ctx = f"links[{i}]"
+        a, b = int(_require(rl, "a", ctx)), int(_require(rl, "b", ctx))
+        for nid in (a, b):
+            if nid not in valid_ids:
+                raise ValueError(f"{ctx}: node {nid} is not declared (0 is the access point)")
+        if a == b:
+            raise ValueError(f"{ctx}: a node cannot link to itself")
+        if "rssi_dbm" not in rl and "loss" not in rl:
+            raise ValueError(f"{ctx}: give rssi_dbm or loss")
+        loss = float(rl.get("loss", 0.0))
+        if not 0.0 <= loss <= 1.0:
+            raise ValueError(f"{ctx}: loss must be in [0, 1], got {loss}")
+        rssi = rl.get("rssi_dbm")
+        out.append(Link(a, b, None if rssi is None else float(rssi), loss))
     return out
 
 

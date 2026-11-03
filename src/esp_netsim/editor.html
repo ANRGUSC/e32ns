@@ -83,6 +83,18 @@ code { font: 12px ui-monospace, Consolas, monospace; }
       <datalist id="firmwares"></datalist>
     </section>
     <section>
+      <h2>Link override</h2>
+      <form id="linkForm">
+        <label for="l-a">between</label><select id="l-a"></select>
+        <label for="l-b">and</label><select id="l-b"></select>
+        <label for="l-rssi">RSSI (dBm)</label><input id="l-rssi" type="number" step="any" placeholder="from distance">
+        <label for="l-loss">extra loss</label><input id="l-loss" type="number" min="0" max="1" step="0.05" placeholder="0 to 1">
+        <span></span><span><button id="l-set" type="button">Set</button> <button id="l-clear" type="button">Clear</button></span>
+      </form>
+      <div class="legend">Applies both ways and replaces the distance model for this pair; click a line to
+        load it. RSSI −120 is a wall. Overridden pairs are marked *.</div>
+    </section>
+    <section>
       <h2>Medium and run</h2>
       <form id="simForm"></form>
     </section>
@@ -145,7 +157,9 @@ function draw() {
     const [x1, y1] = toScreen(a.pos), [x2, y2] = toScreen(b.pos);
     const line = el("line", { x1, y1, x2, y2, stroke: colour(l.pdr), "stroke-width": 1 + 2 * l.pdr,
                               "stroke-dasharray": l.wifi ? "6 4" : "", opacity: 0.85 }, map);
-    el("title", {}, line).textContent = `${label(a)}–${label(b)}: ${l.rssi_dbm} dBm, ${Math.round(l.pdr * 100)} %`;
+    el("title", {}, line).textContent = `${label(a)}–${label(b)}: ${l.rssi_dbm} dBm, ${Math.round(l.pdr * 100)} %${l.set ? " (override)" : ""}`;
+    line.style.cursor = "pointer";
+    line.addEventListener("click", () => loadLink(l.a, l.b));
   }
   for (const n of allNodes()) {
     const [x, y] = toScreen(n.pos);
@@ -203,6 +217,7 @@ document.getElementById("nodeForm").addEventListener("change", () => {
 });
 document.getElementById("del").addEventListener("click", () => {
   doc.nodes = doc.nodes.filter(n => n !== selected);
+  if (doc.links) doc.links = doc.links.filter(l => l.a !== selected.id && l.b !== selected.id);
   selected = null; showNode(); markDirty(); refresh();
 });
 document.getElementById("add").addEventListener("click", () => {
@@ -244,6 +259,32 @@ function buildSimForm() {
   }
 }
 
+const lf = id => document.getElementById("l-" + id);
+const samePair = (l, a, b) => (l.a === a && l.b === b) || (l.a === b && l.b === a);
+function fillLinkSelects() {
+  for (const k of ["a", "b"]) {
+    const cur = lf(k).value;
+    lf(k).replaceChildren(...allNodes().map(n => new Option(label(n), isAp(n) ? 0 : n.id)));
+    if (cur) lf(k).value = cur;
+  }
+}
+function loadLink(a, b) {
+  lf("a").value = a; lf("b").value = b;
+  const o = (doc.links || []).find(l => samePair(l, a, b)) || {};
+  lf("rssi").value = o.rssi_dbm ?? ""; lf("loss").value = o.loss ?? "";
+}
+function editLink(set) {
+  const a = Number(lf("a").value), b = Number(lf("b").value);
+  const o = { a, b };
+  if (lf("rssi").value !== "") o.rssi_dbm = Number(lf("rssi").value);
+  if (lf("loss").value !== "") o.loss = Number(lf("loss").value);
+  doc.links = (doc.links || []).filter(l => !samePair(l, a, b)).concat(set ? [o] : []);
+  if (!doc.links.length) delete doc.links;
+  markDirty(); refresh();
+}
+lf("set").addEventListener("click", () => editLink(true));
+lf("clear").addEventListener("click", () => { editLink(false); lf("rssi").value = lf("loss").value = ""; });
+
 function setStatus(text, cls) { const s = document.getElementById("status"); s.textContent = text; s.className = cls || ""; }
 function markDirty() { dirty = true; setStatus("unsaved changes"); }
 
@@ -260,14 +301,14 @@ async function refresh() {
   } catch (err) {
     setStatus(err.message, "err");
   }
-  draw(); listLinks();
+  draw(); listLinks(); fillLinkSelects();
 }
 function listLinks() {
   const ul = document.getElementById("links");
   ul.replaceChildren(...[...links].sort((a, b) => b.pdr - a.pdr).map(l => {
     const li = document.createElement("li");
     li.style.color = colour(l.pdr);
-    li.textContent = `${label(byId(l.a))}–${label(byId(l.b))}${l.wifi ? " wifi" : ""}  ${l.rssi_dbm} dBm  ${Math.round(l.pdr * 100)} %`;
+    li.textContent = `${l.set ? "*" : " "}${label(byId(l.a))}–${label(byId(l.b))}${l.wifi ? " wifi" : ""}  ${l.rssi_dbm} dBm  ${Math.round(l.pdr * 100)} %`;
     return li;
   }));
   if (!links.length) ul.textContent = "No pair can hear each other.";
