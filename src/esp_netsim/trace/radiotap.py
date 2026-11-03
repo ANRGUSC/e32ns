@@ -66,6 +66,15 @@ def build_frame(src_mac: str, dst_mac: str, payload: bytes, channel: int,
             + build_dot11_action(src_mac, dst_mac, payload, seq))
 
 
+def build_dot11_mgmt(subtype: int, src_mac: str, dst_mac: str, bssid: str, body: bytes,
+                     seq: int = 0) -> bytes:
+    """An 802.11 management frame (probe, auth, assoc) with its fixed fields and IEs in body."""
+    addrs = b"".join(bytes.fromhex(normalize_mac(m).replace(":", ""))
+                     for m in (dst_mac, src_mac, bssid))
+    seq_ctrl = struct.pack("<H", (seq & 0x0FFF) << 4)
+    return struct.pack("<BBH", subtype << 4, 0, 0) + addrs + seq_ctrl + body
+
+
 def build_dot11_data(src_mac: str, dst_mac: str, to_ds: bool, eth_frame: bytes,
                      seq: int = 0) -> bytes:
     """An 802.11 data frame between a station and its AP carrying an Ethernet frame's payload."""

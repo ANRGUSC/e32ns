@@ -99,6 +99,10 @@ class TraceRecorder:
 
 
 def _packet(f: Frame, rssi_dbm: float) -> bytes:
+    if f.mgmt is not None:
+        bssid = f.dst_mac if f.src_node != AP_NODE_ID else f.src_mac
+        return (radiotap.build_radiotap(f.rate_mbps, f.channel, rssi_dbm)
+                + radiotap.build_dot11_mgmt(f.mgmt, f.src_mac, f.dst_mac, bssid, f.payload, f.seq))
     if f.wifi:
         return (radiotap.build_radiotap(f.rate_mbps, f.channel, rssi_dbm)
                 + radiotap.build_dot11_data(f.src_mac, f.dst_mac, f.src_node != AP_NODE_ID,

@@ -15,7 +15,7 @@ from ..medium import MediumEngine, Frame, TxOutcome
 from ..transport.server import MediumServer, Connection
 
 OutcomeHook = Callable[[TxOutcome], None]
-FrameSink = Callable[[], Awaitable[None]]
+FrameSink = Callable[[TxOutcome], Awaitable[None]]
 
 
 @dataclass
@@ -78,9 +78,18 @@ class Simulation:
         self.qemu_nodes[node_id] = qmp
 
     def offer(self, frame: Frame, sink: FrameSink) -> None:
-        """Put a non-ESP-NOW frame on the air this slice; sink runs if and when it is delivered."""
+        """Put a non-ESP-NOW frame on the air this slice; sink gets its verdict when it is due."""
         self._slice_frames.append(frame)
         self._slice_sinks.append(sink)
+
+    async def exchange(self, frame: Frame) -> TxOutcome:
+        """Offer a frame and wait, in virtual time, for its verdict."""
+        verdict = asyncio.get_running_loop().create_future()
+
+        async def resolve(outcome: TxOutcome) -> None:
+            verdict.set_result(outcome)
+        self.offer(frame, resolve)
+        return await verdict
 
     async def wait_for_nodes(self, count: int, timeout: float = 5.0) -> None:
         """Block until `count` nodes have connected and said HELLO."""
@@ -180,8 +189,8 @@ class Simulation:
         f = outcome.frame
         delivered = [r for r in outcome.receivers if r.delivered]
         if sink is not None:
-            if delivered:
-                self._at(delivered[0].delivery_us, sink)
+            due = delivered[0].delivery_us if delivered else f.start_us + outcome.airtime_us
+            self._at(due, lambda: sink(outcome))
             return
         self._at(f.start_us + outcome.airtime_us, lambda: self._send_if_connected(
             f.src_node, protocol.tx_status(f.src_node, f.seq, outcome.status,

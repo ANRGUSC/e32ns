@@ -6,6 +6,7 @@
  * identity comes from the NVS namespace "espnet", written per node by the host launcher.
  * Wire layout mirrors src/esp_netsim/protocol.py: big-endian, 4-byte length prefix.
  */
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -56,6 +57,21 @@ typedef struct __attribute__((packed)) {
     uint32_t rate; uint32_t rssi; uint16_t len; uint8_t data[];
 } rx_msg_t;
 
+/* A station's connect request and the Wi-Fi bridge's reply ride the NIC as Ethernet frames with
+ * the IEEE local experimental ethertype; layout mirrors orchestrator/wifi_link.py. */
+#define ETHERTYPE_CTRL 0x88B5
+enum { OP_CONNECT = 1, OP_CONNECT_REPLY = 2 };
+
+typedef struct __attribute__((packed)) {
+    uint8_t dst[6]; uint8_t src[6]; uint16_t ethertype; uint8_t op; uint8_t ssid_len;
+    uint8_t ssid[32];
+} connect_req_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t dst[6]; uint8_t bssid[6]; uint16_t ethertype; uint8_t op; uint8_t reason;
+    uint8_t channel; int8_t rssi;
+} connect_reply_t;
+
 #define SEQ_RING 16  /* in-flight sends whose TX_STATUS is still pending */
 
 static struct {
@@ -74,6 +90,8 @@ static EventGroupHandle_t s_eg;
 static esp_netif_t *s_netif;
 static esp_eth_handle_t s_eth;
 static bool s_eth_started;
+static bool s_link_up, s_connect_pending, s_associated;
+static uint8_t s_ssid[32], s_ssid_len;
 static StaticEventGroup_t s_eg_mem;
 static StackType_t s_rx_stack[4096];
 static StaticTask_t s_rx_task;
@@ -105,14 +123,62 @@ static void load_identity(void) {
 static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data) {
     xEventGroupSetBits(s_eg, BIT0);
     /* Station apps wait for Wi-Fi events; the open_eth NIC stands in for the station. */
-    wifi_event_sta_connected_t connected = { .channel = s_id.channel };
-    esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &connected, sizeof connected, 0);
+    if (!s_associated) {
+        wifi_event_sta_connected_t connected = { .channel = s_id.channel };
+        esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &connected, sizeof connected, 0);
+    }
     esp_event_post(IP_EVENT, IP_EVENT_STA_GOT_IP, data, sizeof(ip_event_got_ip_t), 0);
+}
+
+static void send_connect(void) {
+    connect_req_t m = { .dst = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+                        .ethertype = __builtin_bswap16(ETHERTYPE_CTRL), .op = OP_CONNECT,
+                        .ssid_len = s_ssid_len };
+    memcpy(m.src, s_id.mac, 6);
+    memcpy(m.ssid, s_ssid, s_ssid_len);
+    s_connect_pending = false;
+    esp_eth_transmit(s_eth, &m, sizeof m);
+}
+
+static void on_link_up(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    s_link_up = true;
+    if (s_connect_pending) send_connect();
+}
+
+/* The bridge has run probe, auth and assoc over the modeled link: report it as the driver would. */
+static void on_connect_reply(const connect_reply_t *r) {
+    if (r->reason == 0) {
+        wifi_event_sta_connected_t e = { .ssid_len = s_ssid_len, .channel = r->channel,
+                                         .authmode = WIFI_AUTH_OPEN, .aid = s_id.node_id };
+        memcpy(e.ssid, s_ssid, s_ssid_len);
+        memcpy(e.bssid, r->bssid, 6);
+        s_associated = true;
+        esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &e, sizeof e, 0);
+        esp_netif_dhcpc_start(s_netif);
+    } else {
+        wifi_event_sta_disconnected_t e = { .ssid_len = s_ssid_len, .reason = r->reason,
+                                            .rssi = r->rssi };
+        memcpy(e.ssid, s_ssid, s_ssid_len);
+        memcpy(e.bssid, r->bssid, 6);
+        esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &e, sizeof e, 0);
+    }
+}
+
+static esp_err_t eth_input(esp_eth_handle_t eth, uint8_t *buf, uint32_t len, void *priv) {
+    const connect_reply_t *r = (const connect_reply_t *)buf;
+    if (len >= sizeof *r && r->ethertype == __builtin_bswap16(ETHERTYPE_CTRL)
+            && r->op == OP_CONNECT_REPLY) {
+        on_connect_reply(r);
+        free(buf);  /* the driver hands each received buffer to its consumer */
+        return ESP_OK;
+    }
+    return esp_netif_receive(s_netif, buf, len, NULL);
 }
 
 /* ESP-NOW control traffic and Wi-Fi traffic both ride QEMU's open_eth NIC. */
 static void ethernet_init(void) {
     if (s_netif) return;
+    load_identity();
     esp_err_t err = esp_netif_init();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(err);
     err = esp_event_loop_create_default();
@@ -128,7 +194,10 @@ static void ethernet_init(void) {
                                               esp_eth_phy_new_dp83848(&phy_cfg));
     ESP_ERROR_CHECK(esp_eth_driver_install(&cfg, &s_eth));
     ESP_ERROR_CHECK(esp_netif_attach(s_netif, esp_eth_new_netif_glue(s_eth)));
+    ESP_ERROR_CHECK(esp_eth_update_input_path(s_eth, eth_input, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_got_ip, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ETHERNET_EVENT_CONNECTED,
+                                               on_link_up, NULL));
 }
 
 static void ethernet_start(void) {
@@ -189,7 +258,6 @@ static void reader_task(void *arg) {
 }
 
 esp_err_t __wrap_esp_now_init(void) {
-    load_identity();
     ethernet_start();
     xEventGroupWaitBits(s_eg, BIT0, pdFALSE, pdTRUE, portMAX_DELAY);
     connect_medium();
@@ -246,14 +314,28 @@ esp_err_t __wrap_esp_wifi_init(const wifi_init_config_t *config) { return ESP_OK
 esp_err_t __wrap_esp_wifi_set_storage(wifi_storage_t storage) { return ESP_OK; }
 esp_err_t __wrap_esp_wifi_set_mode(wifi_mode_t mode) { return ESP_OK; }
 esp_err_t __wrap_esp_wifi_set_channel(uint8_t primary, wifi_second_chan_t second) { return ESP_OK; }
-esp_err_t __wrap_esp_wifi_set_config(wifi_interface_t iface, wifi_config_t *conf) { return ESP_OK; }
+esp_err_t __wrap_esp_wifi_set_config(wifi_interface_t iface, wifi_config_t *conf) {
+    if (iface == WIFI_IF_STA) {
+        s_ssid_len = strnlen((const char *)conf->sta.ssid, sizeof s_ssid);
+        memcpy(s_ssid, conf->sta.ssid, s_ssid_len);
+    }
+    return ESP_OK;
+}
 
 esp_err_t __wrap_esp_wifi_start(void) {
     return esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_START, NULL, 0, portMAX_DELAY);
 }
 
+/* Like the driver, return at once; CONNECTED or DISCONNECTED follows from the bridge's reply. */
 esp_err_t __wrap_esp_wifi_connect(void) {
-    ethernet_start();
+    ethernet_init();
+    if (!s_eth_started) {
+        esp_netif_dhcpc_stop(s_netif);  /* DHCP waits until the AP accepts the station */
+        ESP_ERROR_CHECK(esp_eth_start(s_eth));
+        s_eth_started = true;
+    }
+    s_connect_pending = true;
+    if (s_link_up) send_connect();
     return ESP_OK;
 }
 

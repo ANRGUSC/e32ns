@@ -5,6 +5,7 @@
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -14,10 +15,18 @@
 
 static const char *TAG = "wifi_http";
 static EventGroupHandle_t s_eg;
+static uint8_t s_reason;
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        wifi_event_sta_connected_t *e = data;
+        ESP_LOGI(TAG, "associated with " MACSTR " on channel %d, aid %d",
+                 MAC2STR(e->bssid), e->channel, e->aid);
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_reason = ((wifi_event_sta_disconnected_t *)data)->reason;
+        xEventGroupSetBits(s_eg, BIT1);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = data;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&e->ip_info.ip));
@@ -39,8 +48,17 @@ static void wifi_join(void) {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
     ESP_ERROR_CHECK(esp_wifi_start());
-    while (!(xEventGroupWaitBits(s_eg, BIT0, pdFALSE, pdTRUE, pdMS_TO_TICKS(3000)) & BIT0)) {
-        ESP_LOGW(TAG, "no IP yet: the AP is not answering DHCP");
+    for (;;) {
+        EventBits_t bits = xEventGroupWaitBits(s_eg, BIT0 | BIT1, pdTRUE, pdFALSE,
+                                               pdMS_TO_TICKS(3000));
+        if (bits & BIT0) break;
+        if (bits & BIT1) {
+            ESP_LOGW(TAG, "not associated (reason %d); retrying in 1 s", s_reason);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_wifi_connect();
+        } else {
+            ESP_LOGW(TAG, "no IP yet: the AP is not answering DHCP");
+        }
     }
 }
 

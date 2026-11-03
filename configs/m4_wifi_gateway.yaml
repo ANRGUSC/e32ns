@@ -1,6 +1,6 @@
 # M4: three stations (firmware C) try to join the virtual AP and fetch http://example.com from
 # the real Internet. Every frame crosses the modeled station-AP link: the near station is clean,
-# the edge station needs MAC retries, and the far one never gets a DHCP lease.
+# the edge station needs MAC retries, and the far one never associates (reason 201, no AP found).
 name: m4_wifi_gateway
 
 wifi_ap: { pos: [0, 0], channel: 6 }

@@ -32,6 +32,7 @@ class AccessPoint:
     x: float
     y: float
     channel: int
+    ssid: str = "esp-netsim"
     node_id: int = AP_NODE_ID
 
 
@@ -204,7 +205,10 @@ def _parse_ap(raw: Optional[dict], nodes: list) -> Optional[AccessPoint]:
         return None
     pos = _require(raw, "pos", "wifi_ap")
     ap = AccessPoint(mac=normalize_mac(raw.get("mac", "02:00:00:00:00:01")),
-                     x=float(pos[0]), y=float(pos[1]), channel=int(raw.get("channel", 1)))
+                     x=float(pos[0]), y=float(pos[1]), channel=int(raw.get("channel", 1)),
+                     ssid=str(raw.get("ssid", "esp-netsim")))
+    if not 1 <= len(ap.ssid.encode()) <= 32:
+        raise ValueError("wifi_ap.ssid must be 1 to 32 bytes")
     for n in wifi_nodes:
         if n.firmware is None:
             raise ValueError(f"node {n.node_id}: wifi needs firmware (mock nodes have no IP stack)")

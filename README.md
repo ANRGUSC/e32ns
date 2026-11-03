@@ -59,7 +59,7 @@ Board-vs-emulator results are in RESEARCH_LOG.md V-014.
 
 ```yaml
 name: my_experiment
-wifi_ap: { pos: [0, 0], channel: 6 }            # optional virtual access point
+wifi_ap: { pos: [0, 0], channel: 6, ssid: esp-netsim }   # optional virtual access point
 nodes:
   - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0, 0],  channel: 6, firmware: ../firmware/examples/espnow_ping/build }
   - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [60, 0], channel: 6, firmware: ../firmware/examples/espnow_pong/build }
@@ -108,7 +108,10 @@ CONFIG_IDF_TARGET="esp32s3"                              # in sdkconfig.defaults
 CONFIG_ETH_USE_OPENETH=y
 ```
 
-The shim takes over `esp_now_*` and the Wi-Fi bring-up calls via linker `--wrap`. It reads
+The shim takes over `esp_now_*` and the Wi-Fi bring-up calls via linker `--wrap`. A station's
+`esp_wifi_connect()` runs probe, authentication and association with the virtual AP over the
+modeled link, then posts `WIFI_EVENT_STA_CONNECTED` and starts DHCP, or posts
+`WIFI_EVENT_STA_DISCONNECTED` with the ESP-IDF reason code, so the app's reconnect logic runs. It reads
 each node's ID, MAC and channel from NVS, which the runner writes per node, so one build
 serves every node that runs it. Build the same app with `-DESPNET_HARDWARE=1` for real boards.
 

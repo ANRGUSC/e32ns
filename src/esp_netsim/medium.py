@@ -60,7 +60,8 @@ class Frame:
     seq: int
     payload: bytes
     start_us: int
-    wifi: bool = False          # an infrastructure data frame (payload is an Ethernet frame)
+    wifi: bool = False          # an infrastructure frame between a station and the AP
+    mgmt: Optional[int] = None  # 802.11 management subtype; None: payload is an Ethernet frame
 
     @property
     def broadcast(self) -> bool:

@@ -29,7 +29,7 @@ def outcome_rows(outcome: TxOutcome) -> list[dict]:
     """Flatten a medium verdict into one row per receiver (one row if nobody could hear it)."""
     f = outcome.frame
     base = {"t_us": f.start_us, "src": f.src_node, "dst": f.dst_mac, "seq": f.seq,
-            "wifi": f.wifi, "bytes": len(f.payload), "status": outcome.status,
+            "wifi": f.wifi, "mgmt": f.mgmt, "bytes": len(f.payload), "status": outcome.status,
             "attempts": outcome.attempts}
     if not outcome.receivers:
         return [{**base, "rx": None, "delivered": False, "reason": outcome.reason}]

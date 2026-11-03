@@ -6,7 +6,7 @@ import struct
 import pytest
 
 from esp_netsim.config.schema import parse_scenario, load_scenario
-from esp_netsim.orchestrator.wifi_link import is_medium_control
+from esp_netsim.orchestrator import wifi_link
 from esp_netsim.trace.pcapng import PcapngWriter, LINKTYPE_IEEE802_11_RADIOTAP
 from esp_netsim.trace import radiotap
 
@@ -165,10 +165,19 @@ def _tcp_frame(src_ip: bytes, dst_ip: bytes, sport: int, dport: int) -> bytes:
 
 def test_medium_control_link_bypasses_the_wifi_model():
     guest, host, web = bytes((10, 0, 2, 15)), bytes((10, 0, 2, 2)), bytes((93, 184, 215, 14))
-    assert is_medium_control(_tcp_frame(guest, host, 40000, 52333), 52333)
-    assert is_medium_control(_tcp_frame(host, guest, 52333, 40000), 52333)
-    assert not is_medium_control(_tcp_frame(guest, web, 40000, 80), 52333)
-    assert not is_medium_control(_tcp_frame(guest, host, 40000, 8080), 52333)
+    assert wifi_link.is_medium_control(_tcp_frame(guest, host, 40000, 52333), 52333)
+    assert wifi_link.is_medium_control(_tcp_frame(host, guest, 52333, 40000), 52333)
+    assert not wifi_link.is_medium_control(_tcp_frame(guest, web, 40000, 80), 52333)
+    assert not wifi_link.is_medium_control(_tcp_frame(guest, host, 40000, 8080), 52333)
+
+
+def test_mgmt_frame_header_carries_subtype_and_bssid():
+    body = bytes.fromhex("000001000000")                  # open system, seq 1, success
+    frame = radiotap.build_dot11_mgmt(11, "aa:bb:cc:00:00:01", "02:00:00:00:00:01",
+                                      "02:00:00:00:00:01", body)
+    assert frame[:2] == bytes.fromhex("b000")                # management, authentication
+    assert frame[16:22] == bytes.fromhex("020000000001")     # address 3 is the BSSID
+    assert frame[24:] == body
 
 
 def test_wifi_data_frame_carries_the_ip_packet():
@@ -177,3 +186,13 @@ def test_wifi_data_frame_carries_the_ip_packet():
     assert frame[:2] == b"\x08\x01"                          # data frame, ToDS
     assert frame[24:] == b"\xaa\xaa\x03\x00\x00\x00\x08\x00IPDATA"
 
+
+def test_connect_request_and_reply_round_trip():
+    header = bytes(6) + bytes.fromhex("aabbcc000001") + wifi_link.ETHERTYPE_CTRL
+    req = header + bytes((wifi_link.OP_CONNECT, 3)) + b"lab"
+    assert wifi_link.parse_connect_request(req) == "lab"
+    reply = wifi_link.connect_reply("aa:bb:cc:00:00:01", "02:00:00:00:00:01",
+                                    wifi_link.ASSOCIATED, 6, -61.6)
+    assert reply[12:14] == wifi_link.ETHERTYPE_CTRL
+    rssi = (-62).to_bytes(1, "big", signed=True)
+    assert reply[14:] == bytes([wifi_link.OP_CONNECT_REPLY, wifi_link.ASSOCIATED, 6]) + rssi

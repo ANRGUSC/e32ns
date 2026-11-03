@@ -862,6 +862,59 @@ lists every interferer even when the wanted signal is a wall.
 
 ---
 
+## D-039 — Stations associate with the virtual AP over the modeled link
+
+**Context.** PDF component 5: stations "associate with a virtual access point". Since D-032 a
+station was associated as soon as its link was usable: no management frames, and the app saw
+`WIFI_EVENT_STA_CONNECTED` only when DHCP succeeded. A station out of range failed at DHCP with
+no Wi-Fi event at all, so an app's reconnect logic never ran.
+
+**Decision.**
+- `esp_wifi_connect()` in the shim stops the netif's DHCP client before the NIC comes up and sends
+  a connect request carrying the SSID from `esp_wifi_set_config`. The request is an Ethernet frame
+  with the IEEE local experimental ethertype 0x88B5: the shim has no IP yet, so the TCP link to
+  the medium is not available.
+- The Wi-Fi bridge intercepts the request and runs three exchanges with the AP (node 0) through
+  the medium: probe request/response, authentication (open system, transactions 1 and 2), and
+  association request/response. Each is a unicast management frame at 1 Mbps with the medium's
+  retries, so loss, collisions, carrier sense and `links:` overrides all apply. The AP does not
+  answer a probe for another SSID (`wifi_ap.ssid`, default `esp-netsim`).
+- The bridge answers with a reply frame the shim's Ethernet input hook consumes. On success the
+  shim posts `WIFI_EVENT_STA_CONNECTED` (BSSID, channel, AID) and starts DHCP, which then crosses
+  the link as before. On failure it posts `WIFI_EVENT_STA_DISCONNECTED` with the ESP-IDF reason
+  that step implies: 201 `NO_AP_FOUND` (probe), 2 `AUTH_EXPIRE`, 4 `ASSOC_EXPIRE`.
+- Firmware C now handles `DISCONNECTED` as IDF station examples do: log the reason, retry after
+  1 s. A hardware build of the same app behaves the same way.
+- Management frames are traced as 802.11 management frames (Wireshark decodes the SSID, rates and
+  AID). One sequence counter per transmitter covers management and data frames.
+
+**Scope.** Open authentication only: the WPA2 four-way handshake (four EAPOL frames) is not
+modeled, and the password is ignored. No beacons, no scan dwell time: a failed connect reports
+after its probe's retries (milliseconds), where a real scan takes seconds. No deauthentication or
+beacon loss after association. A firmware node that calls `esp_wifi_connect()` without `wifi: true`
+gets no reply and stays unassociated.
+
+**Checked.** 7 new tests (77 total): association near, out of range, wrong SSID, and blocked by a
+link override; the management frame header; the connect request/reply layout; the shared
+sequence counter. All firmware rebuilt, including the hardware build of firmware C.
+
+---
+
+## V-018 — M4 with association
+
+`configs/m4_wifi_gateway.yaml`, unchanged scenario, new firmware:
+
+| station | distance | association | then |
+|---|---|---|---|
+| 1 | 25 m | 6 frames, one attempt each, 6.2 ms; associated at 467 ms guest time | DHCP at 1.5 s, HTTP 200 every 2 s |
+| 2 | 160 m | probe request took 16 attempts, auth and assoc responses 2 each; 24 ms | DHCP, HTTP 200 every 2 s |
+| 3 | 230 m | every probe request lost after 35 attempts | reason 201 eight times in 10 s, one retry per second |
+
+M2 (26 RTTs), M3 and the 20-node scenario run as before with the rebuilt shim; both stations in
+`example_20_nodes` associate (AID 19 and 20) and fetch example.com.
+
+---
+
 # PART II — Current-state reference
 
 ## Appendix A — Architecture
@@ -895,6 +948,8 @@ lists every interferer even when the wanted signal is a wall.
   per-receiver SINR against overlapping frames with capture, per-attempt retries for unicast
   (`max_retries` 34), ESP-NOW send-callback semantics (D-012, D-031, D-034).
 - `channel/`: log-distance path loss (D-006), SNR→PER (D-007), 802.11 DCF airtime (D-008).
+- `orchestrator/wifi_link.py`: per station, probe/auth/assoc with the AP on a connect request
+  (D-039), then each Ethernet frame as an 802.11 data frame to or from the AP (D-032).
 - `editor.py`/`editor.html`: the topology editor (D-036).
 
 **Determinism.** One seeded RNG. A mock-only run is a pure function of scenario and seed. A run
@@ -929,6 +984,14 @@ success once on the air); RX only for receivers in range, on channel, above the 
 nothing is released before its computed virtual time. For QEMU nodes the medium ignores `t` and
 uses the slice of arrival (D-029).
 
+A Wi-Fi station has no IP when it connects, so its connect request and the reply are Ethernet
+frames on the station's NIC, ethertype 0x88B5, intercepted by the bridge (`wifi_link.py`, D-039):
+
+| frame | after the Ethernet header | meaning |
+|---|---|---|
+| connect request (station → bridge) | `uint8` op = 1, `uint8` ssid_len, `ssid[32]` | `esp_wifi_connect` |
+| connect reply (bridge → station, source MAC = BSSID) | `uint8` op = 2, `uint8` reason (0 = associated), `uint8` channel, `int8` rssi | posted as `STA_CONNECTED` or `STA_DISCONNECTED` |
+
 ## Appendix C — Status and next steps
 
 | M | Goal (PDF) | Status | Evidence |
@@ -936,7 +999,7 @@ uses the slice of arrival (D-029).
 | M1 | Boot an ESP-IDF image under QEMU, capture UART | done | every firmware run; `docs/m1_qemu_boot.log` (D-020) |
 | M2 | Two emulated nodes, controlled delivery and loss | done | `m2_two_qemu`: 20 % constant loss; 5 of 34 pings lost, replies retried and delivered (D-029) |
 | M3 | Several nodes, configurable ESP-NOW connectivity, traces | done | `m3_espnow_line`: delivery falls off with distance, carrier sense and hidden terminals (D-031) |
-| M4 | Wi-Fi to the real Internet and back | done | `m4_wifi_gateway`: HTTP 200 near, retries at the edge, no DHCP out of range (D-032) |
+| M4 | Wi-Fi to the real Internet and back | done | `m4_wifi_gateway`: HTTP 200 near, retries at the edge, no association out of range (D-032, D-039) |
 | M5 | Config file launches all nodes, collects results | done | `esp-netsim run` (D-033) |
 | M6 | GUI: nodes, links, packets, console | done as a replay page | `out/<name>/report.html` (D-033) |
 | — | GUI topology editing (brief: "configuring topology") | done | `esp-netsim edit` (D-036) |
@@ -945,7 +1008,7 @@ uses the slice of arrival (D-029).
 Scenarios with firmware: `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`,
 `hw_txprobe`, `hw_ab`; mock-only: `two_node`, `multi_node_espnow`.
 
-Tests: 70 (medium, barrier, wire codec, config, trace, Wi-Fi bridge, editor, runner end to end).
+Tests: 77 (medium, barrier, wire codec, config, trace, Wi-Fi bridge, editor, runner end to end).
 `test_mixed_barrier_qemu_sender_to_mock_receiver` is wall-clock sensitive; it failed about one
 run in three around D-034 and passed three consecutive runs after D-035.
 
@@ -954,14 +1017,15 @@ on two boards together (V-016). PDR vs distance is not done; it needs the boards
 
 Known limits: timing is quantized to an effective quantum of 0.85–1.3 ms of virtual time; RTT
 reads ~0.6 ms (2 nodes) to ~1 ms (6 nodes) high against the boards (D-035); delivery, loss and
-ordering are exact. Guest clocks drift from host time (D-029). No 802.11 association frames and
-no station-to-station traffic through the AP (D-032). Firmware runs are not bit-reproducible.
+ordering are exact. Guest clocks drift from host time (D-029). Association is open-system only, with
+no WPA2 handshake, beacons or scan time (D-039); no station-to-station traffic through the AP
+(D-032). Firmware runs are not bit-reproducible.
 
 **Next, in order.**
 1. Find why RTT rises as slices shrink (D-035): timestamp the shim's TX and RX path in the guest.
    Then `-icount` or a run-to-next-event barrier for the ~0.5 ms QMP floor.
 2. PDR vs distance on boards moved apart (Appendix E).
-3. 802.11 association frames and station-to-station traffic through one shared AP.
+3. Station-to-station traffic through one shared AP (one slirp per station today, D-032).
 4. A live (not replay) view of a running experiment.
 
 ## Appendix D — Runbook (Linux or WSL2)
