@@ -8,11 +8,11 @@ from pathlib import Path
 TEMPLATE = Path(__file__).with_name("report.html")
 
 
-def write_report(out_dir: Path) -> Path:
-    """Embed results.json and every node's UART log into the replay page."""
-    run = json.loads((out_dir / "results.json").read_text())
-    run["logs"] = {n["id"]: (out_dir / f"node{n['id']}.log").read_text(errors="replace")
-                   for n in run["nodes"] if (out_dir / f"node{n['id']}.log").exists()}
+def write_report(out_dir: Path, results: dict) -> Path:
+    """Embed the run's results and every node's UART log into the replay page."""
+    logs = {n["id"]: (out_dir / f"node{n['id']}.log").read_text(errors="replace")
+            for n in results["nodes"] if (out_dir / f"node{n['id']}.log").exists()}
+    run = {**results, "logs": logs}
     # "</" inside the JSON would end the <script> element early.
     data = json.dumps(run).replace("</", "<\\/")
     page = out_dir / "report.html"

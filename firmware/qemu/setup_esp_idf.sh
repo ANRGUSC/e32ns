@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # One-shot, sudo-free ESP-IDF + Espressif-QEMU setup for esp32s3, proven on WSL2
-# Ubuntu 24.04 (M1). See RESEARCH_LOG.md D-020 for why each step is here.
-#
-# Run this INSIDE a persistent shell (not a fire-and-forget `wsl.exe -e ... &`, which
-# WSL tears down when the launching process exits — D-020).
+# Ubuntu 24.04. RESEARCH_LOG.md D-020 says why each step is here. Run it inside a persistent
+# shell: WSL tears down a fire-and-forget `wsl.exe -e ... &` when the launcher exits.
 set -euo pipefail
 
-IDF_VER="v5.4.2"          # >=5.4.2 also enables ESP-NOW v2.0 (1470-byte) payloads
+IDF_VER="v5.4.2"
 mkdir -p ~/esp && cd ~/esp
 
 # 1) ESP-IDF (shallow clone; submodules are large).
@@ -24,7 +22,7 @@ python3 -m pip install -q cmake ninja
 #    is available, use it. Otherwise fetch it WITHOUT root:
 if ! ldconfig -p 2>/dev/null | grep -q libslirp.so.0; then
   mkdir -p ~/.local/lib ~/.local/slirp && cd ~/.local/slirp
-  apt-get download libslirp0                    # no sudo needed
+  apt-get download libslirp0
   dpkg -x libslirp0_*.deb extracted
   cp "$(find extracted -name 'libslirp.so.0*' -type f | head -1)" ~/.local/lib/
   ( cd ~/.local/lib && ln -sf libslirp.so.0.* libslirp.so.0 )

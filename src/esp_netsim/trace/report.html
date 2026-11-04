@@ -84,18 +84,18 @@ document.getElementById("subtitle").textContent =
 const map = document.getElementById("map");
 const xs = RUN.nodes.map(n => n.pos[0]), ys = RUN.nodes.map(n => n.pos[1]);
 const pad = 40, W = 640;
-const spanX = Math.max(...xs) - Math.min(...xs) || 1, spanY = Math.max(...ys) - Math.min(...ys) || 1;
+const minX = Math.min(...xs), minY = Math.min(...ys);
+const spanX = Math.max(...xs) - minX || 1, spanY = Math.max(...ys) - minY || 1;
 const k = Math.min((W - 2 * pad) / spanX, 360 / spanY);
 const H = Math.max(220, spanY * k + 2 * pad);
 map.setAttribute("viewBox", `0 0 ${W} ${H}`);
-const px = n => [pad + (n.pos[0] - Math.min(...xs)) * k + (W - 2 * pad - spanX * k) / 2,
-                 pad + (n.pos[1] - Math.min(...ys)) * k];
+const px = n => [pad + (n.pos[0] - minX) * k + (W - 2 * pad - spanX * k) / 2, pad + (n.pos[1] - minY) * k];
 
 // Links bow sideways by their length so links along one line of nodes do not hide each other.
+// Callers pass the lower id first, so a link and its flashes bow the same way.
 function arc(a, b) {
-  const [x1, y1] = px(a), [x2, y2] = px(b);
-  const bow = 0.18, [lo, hi] = a.id < b.id ? [1, 1] : [-1, -1];
-  const cx = (x1 + x2) / 2 - (y2 - y1) * bow * lo, cy = (y1 + y2) / 2 + (x2 - x1) * bow * hi;
+  const [x1, y1] = px(a), [x2, y2] = px(b), bow = 0.18;
+  const cx = (x1 + x2) / 2 - (y2 - y1) * bow, cy = (y1 + y2) / 2 + (x2 - x1) * bow;
   return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
 }
 
@@ -108,15 +108,15 @@ function el(tag, attrs, parent) {
 
 const links = {};
 for (const e of events) {
-  const key = [Math.min(e.src, e.rx), Math.max(e.src, e.rx)].join("-");
-  links[key] ??= { a: e.src, b: e.rx, sent: 0, ok: 0 };
-  links[key].sent++;
-  if (e.delivered) links[key].ok++;
+  const [a, b] = [Math.min(e.src, e.rx), Math.max(e.src, e.rx)];
+  const l = links[`${a}-${b}`] ??= { a, b, sent: 0, ok: 0 };
+  l.sent++;
+  if (e.delivered) l.ok++;
 }
 const linkLayer = el("g", {}, map), flashLayer = el("g", {}, map), nodeLayer = el("g", {}, map);
 for (const l of Object.values(links)) {
   const ratio = l.ok / l.sent;
-  const line = el("path", { d: arc(byId[Math.min(l.a, l.b)], byId[Math.max(l.a, l.b)]), fill: "none",
+  const line = el("path", { d: arc(byId[l.a], byId[l.b]), fill: "none",
     "stroke-width": 1 + Math.log2(l.sent),
     stroke: ratio > 0.9 ? css("--ok") : ratio > 0 ? css("--ap") : css("--lost"), "stroke-opacity": 0.35 }, linkLayer);
   el("title", {}, line).textContent = `${l.a} - ${l.b}: ${l.ok}/${l.sent} delivered`;
@@ -124,7 +124,7 @@ for (const l of Object.values(links)) {
 for (const n of RUN.nodes) {
   const [x, y] = px(n);
   const g = el("g", {}, nodeLayer);
-  const isAp = n.firmware === "access point";
+  const isAp = n.id === 0;
   if (isAp) el("rect", { x: x - 10, y: y - 10, width: 20, height: 20, fill: css("--ap") }, g);
   else el("circle", { cx: x, cy: y, r: 11, fill: css("--node") }, g);
   el("text", { x, y: y + 4, "text-anchor": "middle", "font-size": 11, fill: css("--panel") }, g)
@@ -137,7 +137,7 @@ for (const n of RUN.nodes) {
 const scrub = document.getElementById("scrub"), clock = document.getElementById("clock");
 const packets = document.getElementById("packets"), consoleEl = document.getElementById("console");
 scrub.max = RUN.duration_us;
-let now = 0, playing = false, last = 0, shown = null;
+let now = 0, playing = false, last = 0;
 
 const logs = {};
 for (const [id, text] of Object.entries(RUN.logs)) {
@@ -154,7 +154,7 @@ for (const id of Object.keys(logs)) {
   b.onclick = () => { shown = id; render(); };
   tabs.appendChild(b);
 }
-shown = Object.keys(logs)[0] ?? null;
+let shown = Object.keys(logs)[0] ?? null;
 
 function describe(e) {
   const kind = e.wifi ? "Wi-Fi" : "ESP-NOW";
@@ -170,7 +170,7 @@ function render() {
   flashLayer.replaceChildren();
   for (const e of events) {
     if (e.t_us > now) break;
-    if (now - (e.rx_t_us ?? e.t_us) > FLASH_US) continue;
+    if (now - e.rx_t_us > FLASH_US) continue;
     const [a, b] = [byId[Math.min(e.src, e.rx)], byId[Math.max(e.src, e.rx)]];
     el("path", { d: arc(a, b), fill: "none", "stroke-width": 3, stroke: e.delivered ? css("--ok") : css("--lost"),
                  "stroke-dasharray": e.delivered ? "" : "6 4" }, flashLayer);

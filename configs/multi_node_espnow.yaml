@@ -1,33 +1,19 @@
-# M3 — multi-node ESP-NOW with the physical SNR->PER medium (brief §9).
-# A line of 5 nodes 20 m apart; node 1 broadcasts, delivery degrades with distance.
+# Five mock nodes 20 m apart under the physical SNR->PER model: node 1 broadcasts a beacon every
+# 20 ms. All four receivers sit well inside the ~200 m range (V-001), so every beacon arrives;
+# each receiver's RSSI falls with distance. Runs anywhere, no QEMU needed.
 name: multi_node_espnow
 
 nodes:
-  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0,   0], channel: 6 }
-  - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [20,  0], channel: 6 }
-  - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [40,  0], channel: 6 }
-  - { id: 4, mac: "aa:bb:cc:00:00:04", pos: [60,  0], channel: 6 }
-  - { id: 5, mac: "aa:bb:cc:00:00:05", pos: [80,  0], channel: 6 }
-
-medium:
-  error_model: snr_per        # physical model (D-007)
-  path_loss_exponent: 3.0     # ns-3 default (brief §5)
-  tx_power_dbm: 20.0
-  noise_figure_db: 7.0
-  capture_threshold_db: 4.0
-  max_retries: 3
+  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0, 0], channel: 6 }
+  - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [20, 0], channel: 6 }
+  - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [40, 0], channel: 6 }
+  - { id: 4, mac: "aa:bb:cc:00:00:04", pos: [60, 0], channel: 6 }
+  - { id: 5, mac: "aa:bb:cc:00:00:05", pos: [80, 0], channel: 6 }
 
 run:
   duration_us: 200000
   slice_us: 1000
   seed: 7
 
-# Node 1 broadcasts a beacon every 20 ms; delivery to nodes 2..5 should degrade
-# with distance under the snr_per model.
 traffic:
-  - node: 1
-    dst: broadcast
-    at_us: 5000
-    size_bytes: 50
-    count: 8
-    period_us: 20000
+  - { node: 1, dst: broadcast, at_us: 5000, size_bytes: 50, count: 8, period_us: 20000 }

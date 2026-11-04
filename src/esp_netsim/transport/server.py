@@ -6,103 +6,75 @@ import asyncio
 from typing import Awaitable, Callable, Optional
 
 from .. import protocol
-from ..protocol import Message, FrameDecoder, encode_frame
-
-MessageHandler = Callable[[int, Message, "Connection"], Awaitable[None]]
+from ..protocol import FrameDecoder, Message, encode_frame
 
 
 class Connection:
-    """One node's socket connection."""
+    """One node's socket."""
 
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self._reader = reader
         self._writer = writer
-        self._decoder = FrameDecoder()
-        self.node_id: Optional[int] = None
 
     async def send(self, msg: Message) -> None:
         self._writer.write(encode_frame(msg))
         await self._writer.drain()
 
-    async def read_messages(self):
-        """Async generator yielding decoded Messages until EOF."""
-        while True:
-            chunk = await self._reader.read(65536)
-            if not chunk:
-                return
-            for msg in self._decoder.feed(chunk):
+    async def messages(self):
+        """Decoded messages until EOF."""
+        decoder = FrameDecoder()
+        while chunk := await self._reader.read(65536):
+            for msg in decoder.feed(chunk):
                 yield msg
 
     def close(self) -> None:
-        try:
-            self._writer.close()
-        except Exception:
-            pass
+        self._writer.close()
+
+
+MessageHandler = Callable[[Message, Connection], Awaitable[None]]
 
 
 class MediumServer:
-    """Loopback TCP server: hands every inbound message to the handler and sends to nodes by id."""
+    """Loopback TCP server on a free port: hands every inbound message to the handler."""
 
-    def __init__(self, port: int):
-        self.port = port
+    def __init__(self, handler: MessageHandler):
+        self._handler = handler
         self._server: Optional[asyncio.AbstractServer] = None
         self._conns: dict[int, Connection] = {}
-        self._pending: set[Connection] = set()
-        self._handler: Optional[MessageHandler] = None
-        self.on_connect: Optional[Callable[[Connection], Awaitable[None]]] = None
-        self.on_disconnect: Optional[Callable[[int], Awaitable[None]]] = None
-
-    def set_handler(self, handler: MessageHandler) -> None:
-        self._handler = handler
 
     @property
-    def actual_port(self) -> int:
-        if self._server is None:
-            return self.port
+    def port(self) -> int:
         return self._server.sockets[0].getsockname()[1]
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._on_client, "127.0.0.1", self.port)
+        self._server = await asyncio.start_server(self._on_client, "127.0.0.1", 0)
 
     async def _on_client(self, reader, writer) -> None:
         conn = Connection(reader, writer)
-        self._pending.add(conn)
-        if self.on_connect:
-            await self.on_connect(conn)
+        node_id = None
         try:
-            async for msg in conn.read_messages():
-                # First HELLO binds the connection to a node id.
-                if msg.type == protocol.HELLO and conn.node_id is None:
-                    conn.node_id = msg.node
-                    self._conns[conn.node_id] = conn
-                    self._pending.discard(conn)
-                if self._handler is not None:
-                    await self._handler(conn.node_id, msg, conn)
+            async for msg in conn.messages():
+                if msg.type == protocol.HELLO and node_id is None:
+                    node_id = msg.node
+                    self._conns[node_id] = conn
+                await self._handler(msg, conn)
         finally:
-            if conn.node_id is not None:
-                self._conns.pop(conn.node_id, None)
-                if self.on_disconnect:
-                    await self.on_disconnect(conn.node_id)
-            self._pending.discard(conn)
+            self._conns.pop(node_id, None)
             conn.close()
 
     async def send(self, node_id: int, msg: Message) -> None:
-        conn = self._conns.get(node_id)
-        if conn is None:
-            raise KeyError(f"no connected node {node_id}")
-        await conn.send(msg)
+        await self._conns[node_id].send(msg)
 
     async def broadcast(self, msg: Message) -> None:
         for conn in list(self._conns.values()):
             await conn.send(msg)
 
     @property
-    def connected_nodes(self) -> list[int]:
-        return sorted(self._conns.keys())
+    def connected_nodes(self) -> set[int]:
+        return set(self._conns)
 
     async def stop(self) -> None:
         for conn in list(self._conns.values()):
             conn.close()
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
+        self._server.close()
+        await self._server.wait_closed()

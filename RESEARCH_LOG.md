@@ -16,11 +16,9 @@ and `../compass_artifact_wf-...text_markdown.md` (the prior research brief, "the
 
 ## D-000 — Framing: build the host-side core first, QEMU path source-only
 
-Reversed by D-019. With `qemu-system-xtensa` and ESP-IDF not installed on this Windows machine,
-the first session built the medium, orchestration and tracing as a standalone Python package
-exercised by a pure-Python `MockNode`, and left the QEMU shim as unrun source. D-019 found WSL2
-could run the real toolchain, and D-020 booted firmware. The protocol seam and MockNode survive
-(D-002, D-015) as the medium's test harness, not as milestone evidence.
+Reversed by D-019. The first session, without ESP-IDF or QEMU installed, built the medium and
+tracing in Python around a `MockNode` and left the shim as unrun source. The protocol seam and
+MockNode survive (D-002, D-015) as the medium's test harness.
 
 ---
 
@@ -29,9 +27,8 @@ could run the real toolchain, and D-020 booted firmware. The protocol seam and M
 **Decision.** Python 3.11 with `asyncio` for orchestrator, transport and medium, stdlib-only core.
 
 **Rationale.** The brief recommends it to match ANRG's PyWiSim/ncsim conventions (brief §9, §10).
-The per-slice workload is small (N frames per barrier) and I/O-bound, so Python is fast enough for
-tens of nodes. If the medium becomes the bottleneck at hundreds of nodes, the N×N path-loss/SINR
-hot path is isolated in `channel/` and can be vectorized or ported.
+The per-slice workload is small and I/O-bound, so Python is fast enough for tens of nodes; the
+N×N path-loss/SINR hot path is the part to vectorize or port if hundreds of nodes need it.
 
 ---
 
@@ -68,7 +65,7 @@ server with explicit message boundaries avoids the reconnect fragility the brief
 head-of-line ordering TCP adds is harmless because a node's own frames are ordered anyway.
 
 On QEMU the guest reaches this listener as `10.0.2.2` through open_eth and slirp NAT (V-004).
-The body went from JSON to binary in V-005.
+The body is binary (V-005).
 
 ---
 
@@ -124,14 +121,11 @@ scenario settings so the model can be fitted to measured PDR (Appendix E).
 
 ## D-007 — Error model: an SNR→PER interface with constant and physical implementations
 
-**Decision.** An `ErrorRateModel` interface `per(ctx) -> float`, with:
+**Decision.** An error model `per(snr_db, nbytes, rate_mbps) -> float`, with:
 1. `ConstantErrorModel(per)`: fixed packet error rate, for controlled-loss runs (M2).
 2. `SnrPerErrorModel`: path loss → SNR → per-modulation BER → `PER = 1 − (1 − BER)^(8·nbytes)`.
    DBPSK for 1 Mbps (ESP-NOW); the 11 Mbps Wi-Fi link (CCK) is approximated as coherent QPSK.
    The OFDM M-QAM tables were removed in D-037: no node ever sends at those rates.
-
-A third, Cooja-UDGM-style `RangeThresholdErrorModel`, was shipped and later deleted by D-027 as
-unused.
 
 **Rationale.** Matches the brief's staged fidelity (constant loss for M2, physical model for M3;
 brief §5, §9). Keeping the interface leaves room for a Gilbert-Elliott model (brief §10d).
@@ -151,8 +145,7 @@ with DSSS slot 20 µs, SIFS 10 µs, DIFS 50 µs, long PLCP preamble+header 192 �
 Backoff is a seeded uniform draw in `[0, CW·slot]`.
 
 **Rationale.** These are the brief's DCF constants. A 1-byte frame at 1 Mbps comes out on the
-order of 10³ µs, the same order as the measured 1,059 µs one-way latency (brief §3). Header,
-preamble and rate are parameters. Board measurements later confirmed 8 µs per byte, i.e. 1 Mbps
+order of 10³ µs, the same order as the measured 1,059 µs one-way latency (brief §3). Board measurements later confirmed 8 µs per byte, i.e. 1 Mbps
 (V-014, V-016); the ~15-byte ESP-NOW vendor header is not modeled (V-014).
 
 ---
@@ -218,12 +211,9 @@ keeps a frame in flight for all its attempts.
 
 ## D-014 — Barrier dispatch: deliveries computed while paused, sent at a boundary
 
-Original decision: process a slice's frames as one batch after every node reaches the barrier,
-then dispatch, so a frame sent in slice k is acted on by slice k+1 at the latest; RX and trace
-timestamps carry the computed delivery time even though dispatch is quantized. D-029 (item 3)
-replaced the "end of the sending slice" rule: every delivery is now held until its computed
-virtual time and released at the first boundary at or after it. The batch-while-paused discipline
-and exact trace timestamps remain.
+A slice's frames are processed as one batch while every node is paused; RX and trace timestamps
+carry the computed delivery time. The original rule, dispatch at the end of the sending slice, was
+replaced by D-029: each delivery is held until its computed virtual time.
 
 ---
 
@@ -287,10 +277,9 @@ packed structs with the transport folded in.
 
 ---
 
-## D-018 — Code-review pass: three correctness fixes
+## D-018 — Code-review pass: four correctness fixes
 
-After the mock path was green (54 tests), a reviewer sub-agent audited the Python core. Fixes,
-each locked by a test (now in `test_medium.py` and `test_barrier.py`):
+A review of the Python core found four bugs, each now locked by a test:
 1. Phantom interference: `process_batch` registered every frame as in-flight, including frames
    rejected before transmission. Now only frames that radiated (`attempts > 0`) interfere.
    (D-034 later made a unicast to an absent MAC radiate.)
@@ -298,27 +287,20 @@ each locked by a test (now in `test_medium.py` and `test_barrier.py`):
    `SLICE_DONE` whose `t` equals the current slice's `until_us` counts.
 3. RX timestamp late by SIFS + ACK (~314 µs at 1 Mbps): the data frame now lands
    `ack_tail = SIFS + ACK` before the acknowledged airtime ends; the send callback still fires
-   at full airtime (`AirtimeModel.ack_tail_us()`).
+   at full airtime (`ACK_TAIL_US`).
 4. A weak-link drop is labelled `below_sensitivity`, not `collision`.
 
 ---
 
 ## D-019 — Course correction: reverse D-000, do the emulator, spike risks first
 
-An advisor-style review made the charge, accepted here, that the project had built a simulator
-and skipped the emulator. D-000 treated a missing binary as a constraint; this machine has WSL2
-Ubuntu 24.04 with internet access, so ESP-IDF and Espressif QEMU install normally. The brief
-(§9) says to spike the three highest-risk unknowns first: (1) QMP barrier timing, (2) frame
-transport out of QEMU, (3) shim linkage over IDF. The first session had done none of them.
-
-Accepted corrections: M2/M3/M5 are not "done" until real firmware runs them; the shim had never
-been compiled; V-001 is a units check; JSON on a µs-sensitive per-frame path is a smell, so the
-wire goes binary before timing anything.
-
-New order: M1 for real (D-020), spike #3 linkage (D-021), spike #2 transport (V-004, V-005),
-spike #1 barrier (V-006 to V-008), then real nodes through the medium (V-009), then M4 and
-hardware. The protocol decoupling stays, now justified by the medium being out-of-process by
-nature; MockNode stays as the CI harness.
+A review found the project had built a simulator and skipped the emulator. D-000 treated a
+missing binary as a constraint, but WSL2 Ubuntu 24.04 installs ESP-IDF and Espressif QEMU
+normally. Corrections: a milestone is done only when real firmware runs it; V-001 is a units
+check; the wire goes binary before anything is timed. New order, following the brief's advice to
+spike the highest risks first (§9): M1 for real (D-020), shim linkage (D-021), transport out of
+QEMU (V-004, V-005), the QMP barrier (V-006 to V-008), real nodes through the medium (V-009),
+then M4 and hardware.
 
 ---
 
@@ -429,23 +411,18 @@ contained that string; kill by exact name instead.
 
 ## V-008 / D-025 — Latency fidelity at 250 µs slices; scenarios default to 250 µs
 
-Revised by V-010 and D-035. This modeled each slice as exactly S µs of guest time and computed the
-reactive latency of 300 real frames as `ceil((t + airtime)/S)·S − t` against the medium's 908 µs
-airtime for a 16-byte acknowledged unicast: 1 ms slices gave 1,384 µs (52.5 % error, fail),
-250 µs gave 1,038 µs (14.3 %, pass). D-025 set the slice to 250 µs, which every firmware
-scenario still uses. V-010 then measured that a slice actually advances the guests ~2 ms because they run through
-the QMP round trips, so 14.3 % does not describe what firmware sees; D-035 brought the effective
-quantum to 0.85–1.3 ms.
+Assuming a slice is exactly S µs of guest time, the reactive latency of 300 real frames against
+the medium's 908 µs airtime came out 1,384 µs at 1 ms slices (52.5 % error, fail) and 1,038 µs at
+250 µs (14.3 %, pass), so D-025 set firmware scenarios to 250 µs. The assumption was wrong: a
+slice advances the guests further than S (V-010), and D-035 brought the effective quantum to
+0.85–1.3 ms.
 
 ---
 
 ## D-026 — Mixed barrier: QMP-gated QEMU nodes and message-gated mocks together
 
 Per slice the clock master releases all participants at once and waits for all: mocks by
-RUN_SLICE/SLICE_DONE, QEMU nodes by `cont`, run, `stop`. With no QEMU nodes the behavior is
-unchanged. This was first built as a `NodeGate` abstraction in `orchestrator/gate.py`; D-027
-collapsed the protocol and D-033 removed the file, so the barrier now calls `cont`/`stop` on the
-QMP clients directly. The mixed barrier itself remains (`simulation.py`).
+RUN_SLICE/SLICE_DONE, QEMU nodes by QMP `cont`, run, `stop` (`simulation.py`).
 
 ---
 
@@ -461,11 +438,9 @@ nodes followed in D-028/D-029.
 
 ## D-027 — Deslop pass before the two-node work
 
-Applied `CLAUDE.md`: deleted code with no caller. Removed `RangeThresholdErrorModel` and its
-config (overrides D-007's three models), the JSON debug codec, `QemuNodeSpec`/`QemuNodeHandle`,
-the one-implementation `PropagationLoss` and `NodeGate` protocols, several dead helpers and
-validation guards, and config fields no scenario set. Docstrings cut to one line. Net: Python
-3185 → 2682 lines, C 496 → 483; 56 tests (three deleted with their subjects).
+Deleted code with no caller under `CLAUDE.md`: a third range-threshold error model, the JSON
+debug codec, one-implementation protocols, dead helpers and guards, unset config fields. Python
+3185 → 2682 lines; 56 tests.
 
 ---
 
@@ -796,28 +771,11 @@ change the path-loss exponent, save, and a duplicate MAC shown as an error.
 
 ## D-037 — Deslop pass after the hardware and editor work
 
-Deleted what had no caller or that no scenario could reach; behavior is unchanged.
-- Wire messages carry payloads and LMKs as bytes; the hex round-trip left from the JSON wire
-  (D-017, V-005) is gone, with `Message.t`, `FrameDecoder.pending_bytes`, the encode-side size
-  check, and `hello()`'s capability arguments that every caller passed the same.
-- Path loss and link budget are one `LogDistance(exponent, tx_power_dbm)` (D-006). Shadowing,
-  antenna gains, reference distance and frequency were never settable from a scenario.
-- The error model keeps DBPSK and the QPSK form; the OFDM M-QAM tables, and
-  `ReceptionContext.distance_m`, which nothing read, are gone (D-007). 11 Mbps already resolved
-  to the QPSK formula, so no result changes.
-- Mock traffic lost `rate_mbps` and per-frame channel (always 1 Mbps on the node's channel).
-- The medium's unicast retry loop dropped a duplicate attempt counter and an impossible-None guard;
-  the broadcast loop lost an if/else whose branches were identical.
-- `esp-netsim info` (fixed text) is gone; `--version` remains.
-- `tests/test_review_fixes.py` was split into the files for its subjects; path-loss tests merged.
-- Citations: one D-number per file, at the top. Two files cited D-030 (rejected real-time mode)
-  for the Wi-Fi bridge, which is D-032.
-
-**Checked.** 62 tests pass. The mock-only scenarios `two_node` and `multi_node_espnow` give
-byte-identical `results.json` and `trace.pcapng` before and after; `m2_two_qemu` (26 RTTs, 26 ACKed
-replies) and `m4_wifi_gateway` (HTTP 200 from example.com) run with real firmware.
-
-Open, not changed: the shim sends `DEL_PEER` and the medium accepts and ignores it (Appendix B).
+Deleted what had no caller or that no scenario could reach: the hex round-trip left from the JSON
+wire, path-loss options no scenario could set (shadowing, antenna gains, reference distance), the
+OFDM M-QAM error tables (no node sends at those rates), `esp-netsim info`, and duplicated loop
+logic in the medium. 62 tests; `two_node` and `multi_node_espnow` byte-identical before and after;
+M2 and M4 run with real firmware.
 
 ---
 
@@ -915,6 +873,54 @@ M2 (26 RTTs), M3 and the 20-node scenario run as before with the rebuilt shim; b
 
 ---
 
+## D-040 — Whole-codebase deslop; the wire carries only what a reader uses
+
+Three read-only audits (core, orchestrator and UI, firmware and tests) against `CLAUDE.md`, every
+claim grepped, then applied. Behavior changes are listed first; everything else is deletion.
+
+**Changed on purpose.**
+- `normalize_mac` accepted `a_:bb:…` and `+a:bb:…` (`int(x, 16)` tolerates both), so a bad MAC
+  passed config validation and failed later. It is now one regex; the dash and bare-hex forms,
+  which no scenario used, are gone.
+- The scenario parser rejects unknown keys in every section, so a typo or a removed setting
+  fails at load instead of being ignored. It also rejects `slice_us`, `duration_us` or
+  `count` below 1 and a 3-D `pos`. Removed settings: `run.port` (always 0),
+  `medium.capture_threshold_db` (only ever set to its default), the `bcast` alias, node `z`.
+- Wire (both sides, firmware rebuilt): HELLO lost `caps`, WELCOME carries only `node`, ADD_PEER
+  lost `channel`, TX and RX lost `rate` (ESP-NOW is always 1 Mbps), TX_STATUS lost `t`. No reader
+  used any of them. `DEL_PEER` is now modeled: the medium drops the peer, which matters for the
+  encryption check. The codec is one layout table instead of two hand-written branch chains.
+- The shim no longer posts `WIFI_EVENT_STA_CONNECTED`/`IP_EVENT_STA_GOT_IP` to an ESP-NOW-only
+  app, which a board never does; a station still gets them from association (D-039).
+- `test_mixed_barrier_qemu_sender_to_mock_receiver` asserted exactly three slices in 3 ms, which
+  depends on wall-clock time per slice (the flake noted since D-034). It now asserts one
+  `cont`/`stop` pair per slice run.
+
+**Collapsed.** `channel/` (five modules) is one `channel.py`; `AirtimeModel`'s eight fields, never
+overridden, are constants. `MediumConfigSpec` is gone: the parser builds `MediumConfig`.
+`TraceRecorder` is a hook function; one 802.11 header builder serves action, management and data
+frames. `MockNode` reuses the transport's `Connection` and lost `barrier_ack`: a node registered
+as QEMU never receives RUN_SLICE, so the test stand-in did not need it. The server lost two hooks
+nothing assigned and a set nothing read. `results.json` is passed to the report instead of being
+read back from disk.
+
+**Removed elsewhere.** Dead branches in the replay page, a tracked 289 KB install log, stale
+config comments (`multi_node_espnow` claimed a distance falloff that its 80 m line cannot show),
+config keys equal to their defaults, and redundant `.gitignore`/`.gitattributes` entries. Tests:
+getter-only and duplicate tests removed, reject cases merged into one table; 77 → 71.
+
+**Checked.** Python 2826 → 2296 lines, tests 1051 → 833, shim 359 → 348. The mock scenarios give
+byte-identical `results.json`, `trace.pcapng` and stdout before and after; `report.html` differs
+only in its script, with identical embedded data. All firmware rebuilt, including the hardware
+builds; M2 (26 RTTs), M3, M4 (association, HTTP 200, reason 201 out of range), the 20-node
+scenario and `hw_txprobe` (28 ms / 91 ms failed unicasts, as in V-014) run with real firmware.
+
+The comparison harness now runs each git revision from an archive in a separate directory. An
+earlier ad hoc check had compared a stale `out/two_node/` (the output directory is named after
+the scenario's `name`); re-run properly, D-037's and D-038's identity claims hold.
+
+---
+
 # PART II — Current-state reference
 
 ## Appendix A — Architecture
@@ -947,7 +953,7 @@ M2 (26 RTTs), M3 and the 20-node scenario run as before with the rebuilt shim; b
 - `medium.py` holds positions, channels and peers and decides each frame: carrier-sense deferral,
   per-receiver SINR against overlapping frames with capture, per-attempt retries for unicast
   (`max_retries` 34), ESP-NOW send-callback semantics (D-012, D-031, D-034).
-- `channel/`: log-distance path loss (D-006), SNR→PER (D-007), 802.11 DCF airtime (D-008).
+- `channel.py`: log-distance path loss (D-006), SNR→PER (D-007), 802.11 DCF airtime (D-008).
 - `orchestrator/wifi_link.py`: per station, probe/auth/assoc with the AP on a connect request
   (D-039), then each Ethernet frame as an 802.11 data frame to or from the AP (D-032).
 - `editor.py`/`editor.html`: the topology editor (D-036).
@@ -960,22 +966,22 @@ with QEMU nodes is not bit-reproducible: guest timing changes the order frames r
 TCP to `127.0.0.1:<port>` (the guest reaches it as `10.0.2.2:<port>` through slirp). Every message
 is a `uint32` big-endian length and a binary body: `uint8` tag, then fixed big-endian fields; MACs
 are 6 raw bytes, payloads `uint16` length + bytes, floats IEEE-754 `float32`. The authoritative
-layout is `protocol.py` (`encode_body`/`decode_body`), mirrored by the packed structs in
-`espnet_shim.c` and locked by `tests/test_protocol.py`.
+layout is `protocol._LAYOUT`, mirrored by the packed structs in `espnet_shim.c` and locked by
+`tests/test_protocol.py`.
 
 | Node → Medium | fields | meaning |
 |---|---|---|
-| `HELLO` | node, mac, caps | register |
-| `ADD_PEER` | node, peer, channel, encrypt, lmk | `esp_now_add_peer` |
-| `DEL_PEER` | node, peer | `esp_now_del_peer` (accepted, not modeled) |
-| `TX` | node, t, src, dst, channel, rate, seq, data | an ESP-NOW frame offered to the air |
+| `HELLO` | node, mac | register |
+| `ADD_PEER` | node, peer, encrypt, lmk | `esp_now_add_peer` |
+| `DEL_PEER` | node, peer | `esp_now_del_peer` |
+| `TX` | node, t, src, dst, channel, seq, data | an ESP-NOW frame offered to the air (1 Mbps) |
 | `SLICE_DONE` | node, t | mock node reached the barrier |
 
 | Medium → Node | fields | meaning |
 |---|---|---|
-| `WELCOME` | node, slice_us, mac | ack HELLO |
-| `TX_STATUS` | node, seq, status, t | the send-callback verdict, at its computed time |
-| `RX` | node, t, src, dst, channel, rate, rssi, data | deliver to the receive callback |
+| `WELCOME` | node | ack HELLO |
+| `TX_STATUS` | node, seq, status | the send-callback verdict, at its computed time |
+| `RX` | node, t, src, dst, channel, rssi, data | deliver to the receive callback |
 | `RUN_SLICE` | until_t | mock node: run to `until_t` |
 | `SHUTDOWN` | — | orderly stop |
 
@@ -1008,12 +1014,11 @@ frames on the station's NIC, ethertype 0x88B5, intercepted by the bridge (`wifi_
 Scenarios with firmware: `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`,
 `hw_txprobe`, `hw_ab`; mock-only: `two_node`, `multi_node_espnow`.
 
-Tests: 77 (medium, barrier, wire codec, config, trace, Wi-Fi bridge, editor, runner end to end).
-`test_mixed_barrier_qemu_sender_to_mock_receiver` is wall-clock sensitive; it failed about one
-run in three around D-034 and passed three consecutive runs after D-035.
+Tests: 71 (medium, barrier, wire codec, config, trace, Wi-Fi bridge, editor, runner end to end).
 
 Hardware: send-callback timing and retry count on two boards (V-014, V-015); A/B RTT vs payload
-on two boards together (V-016). PDR vs distance is not done; it needs the boards moved apart.
+on two boards together (V-016). PDR vs distance is out of scope for this phase (decided
+2026-11-02).
 
 Known limits: timing is quantized to an effective quantum of 0.85–1.3 ms of virtual time; RTT
 reads ~0.6 ms (2 nodes) to ~1 ms (6 nodes) high against the boards (D-035); delivery, loss and
@@ -1021,12 +1026,14 @@ ordering are exact. Guest clocks drift from host time (D-029). Association is op
 no WPA2 handshake, beacons or scan time (D-039); no station-to-station traffic through the AP
 (D-032). Firmware runs are not bit-reproducible.
 
-**Next, in order.**
+**Open, in order.**
 1. Find why RTT rises as slices shrink (D-035): timestamp the shim's TX and RX path in the guest.
    Then `-icount` or a run-to-next-event barrier for the ~0.5 ms QMP floor.
-2. PDR vs distance on boards moved apart (Appendix E).
-3. Station-to-station traffic through one shared AP (one slirp per station today, D-032).
+2. Station-to-station traffic through one shared AP (one slirp per station today, D-032).
+3. WPA2 four-way handshake and beacons (D-039).
 4. A live (not replay) view of a running experiment.
+5. PDR vs distance on boards moved apart, to fit `path_loss_exponent`, `tx_power_dbm` and
+   `noise_figure_db` (out of scope for now).
 
 ## Appendix D — Runbook (Linux or WSL2)
 
@@ -1044,22 +1051,12 @@ Gotchas this encodes: the S3 ROM loads the bootloader at 0x0 (the runner uses th
 load); QMP must use a UNIX socket (V-007); UART must be written to a Linux path (V-011);
 `pkill -f qemu-system-xtensa` also kills the shell that ran it (V-007), so kill by exact name.
 
-## Appendix E — Validation plan
+## Appendix E — Validation summary
 
-Done, no hardware: V-001 (emergent ~200 m range matches published ESP-NOW LOS range, a
-self-consistency check); unit reference points (Friis reference loss, DCF constants, airtime);
-M2–M4 behave as the model predicts (loss rate, distance falloff, retries, hidden terminals).
-
-Done, one board at a time (V-014, V-015): firmware A boots unmodified on an ESP32-S3;
-send-callback latency for broadcast and for an unanswered unicast, 16–250 bytes, board vs
-emulator. This set the retry count to 35 transmissions and made an unanswered unicast radiate.
-
-Done, two boards together (V-016, D-035): RTT vs payload (13, 128, 250 bytes), board vs emulator.
-After D-035 the emulator reads 0.6–1.4 ms high and tracks the per-byte slope (15.6 against
-16.3 µs per byte).
-
-Next, with the boards apart: PDR vs distance with firmware A and B. Tune `path_loss_exponent`,
-`tx_power_dbm`, `noise_figure_db` to the measured curve and report the residual.
-
-Success: PDR curves overlap within measurement variance on one nontrivial multi-node scenario,
-and the latency gap is explained by the quantum.
+| what | how | result |
+|---|---|---|
+| model self-consistency | V-001; unit reference points (Friis loss, DCF constants, airtime) | ESP-NOW range ~200 m, matching published LOS range; a units check, not validation |
+| model behavior with firmware | M2–M4 scenarios | loss rate, distance falloff, retries, hidden terminals and association behave as modeled |
+| send callback on hardware | V-014, V-015: one board, 16–250 bytes | 33–35 transmissions before FAIL; set `max_retries` 34 and made an unanswered unicast radiate |
+| RTT on hardware | V-016, D-035: two boards, 13–250 bytes | emulator 0.6–1.4 ms high; per-byte slope 15.6 against 16.3 µs |
+| PDR vs distance | not done (Appendix C) | the radio-model constants are defaults, not fitted |

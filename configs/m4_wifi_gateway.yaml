@@ -10,9 +10,6 @@ nodes:
   - { id: 2, mac: "aa:bb:cc:00:00:02", pos: [160, 0], channel: 6, wifi: true, firmware: ../firmware/examples/wifi_http/build }
   - { id: 3, mac: "aa:bb:cc:00:00:03", pos: [0, 230], channel: 6, wifi: true, firmware: ../firmware/examples/wifi_http/build }
 
-medium:
-  error_model: snr_per
-
 run:
   duration_us: 10000000
   slice_us: 250

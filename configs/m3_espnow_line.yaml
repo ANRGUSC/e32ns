@@ -10,9 +10,6 @@ nodes:
   - { id: 4, mac: "aa:bb:cc:00:00:04", pos: [190, 0], firmware: ../firmware/examples/espnow_pong/build }
   - { id: 5, mac: "aa:bb:cc:00:00:05", pos: [260, 0], firmware: ../firmware/examples/espnow_pong/build }
 
-medium:
-  error_model: snr_per
-
 run:
   duration_us: 6000000
   slice_us: 250

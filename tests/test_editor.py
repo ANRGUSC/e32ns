@@ -44,7 +44,7 @@ def _post(url: str, doc: dict) -> tuple[int, dict]:
 
 
 def test_links_follow_distance(editor):
-    path, url = editor
+    _, url = editor
     status, body = _post(url + "/links", yaml.safe_load(SCENARIO))
     assert status == 200
     pairs = {(l["a"], l["b"]): l for l in body["links"]}

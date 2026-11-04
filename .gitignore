@@ -1,14 +1,10 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.eggs/
 build/
-dist/
 .pytest_cache/
 out/
-*.pcapng
-# ESP-IDF build artifacts
-firmware/**/build/
-firmware/**/build_*/
+# ESP-IDF build variants (build_hw, build_128, ...) and per-machine config
+build_*/
 sdkconfig
 sdkconfig.old

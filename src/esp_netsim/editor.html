@@ -141,7 +141,7 @@ const colour = pdr => pdr >= 0.9 ? "var(--ok)" : pdr >= 0.1 ? "var(--weak)" : "v
 
 function scaleBar() {
   const target = 120 / view.k, step = 10 ** Math.floor(Math.log10(target));
-  const m = [1, 2, 5, 10].map(f => f * step).filter(v => v <= target).pop() || step;
+  const m = [1, 2, 5, 10].map(f => f * step).filter(v => v <= target).pop();
   const g = el("g", { fill: "var(--muted)", stroke: "var(--muted)" }, map);
   el("line", { x1: 12, y1: H - 14, x2: 12 + m * view.k, y2: H - 14, "stroke-width": 2 }, g);
   el("text", { x: 12, y: H - 20, "font-size": 12, stroke: "none" }, g).textContent = `${m} m`;

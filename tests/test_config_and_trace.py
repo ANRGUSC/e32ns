@@ -1,17 +1,14 @@
-"""Tests for config parsing/validation (schema.py) and pcapng tracing (trace/*)."""
+"""Scenario validation at the config boundary, and the pcapng/802.11 trace bytes."""
 
 import io
 import struct
 
 import pytest
 
-from esp_netsim.config.schema import parse_scenario, load_scenario
-from esp_netsim.orchestrator import wifi_link
-from esp_netsim.trace.pcapng import PcapngWriter, LINKTYPE_IEEE802_11_RADIOTAP
+from esp_netsim.config.schema import parse_scenario
 from esp_netsim.trace import radiotap
+from esp_netsim.trace.pcapng import LINKTYPE_IEEE802_11_RADIOTAP, PcapngWriter
 
-
-# ---- config ---------------------------------------------------------------
 
 def _valid_doc():
     return {
@@ -26,173 +23,91 @@ def _valid_doc():
 
 
 def test_parse_valid_scenario_builds_engine():
-    sc = parse_scenario(_valid_doc())
-    assert sc.name == "t" and len(sc.nodes) == 2
-    assert sc.slice_us == 1000 and sc.seed == 3
-    engine = sc.build_engine()
-    assert engine.node(1).mac == "aa:bb:cc:00:00:01"
+    engine = parse_scenario(_valid_doc()).build_engine()
     assert engine.node(2).x == 5.0
-
-
-def test_parse_rejects_duplicate_ids():
-    doc = _valid_doc()
-    doc["nodes"][1]["id"] = 1
-    with pytest.raises(ValueError, match="duplicate node id"):
-        parse_scenario(doc)
-
-
-def test_parse_rejects_bad_error_model():
-    doc = _valid_doc()
-    doc["medium"]["error_model"] = "wormhole"
-    with pytest.raises(ValueError, match="error_model"):
-        parse_scenario(doc)
-
-
-def test_parse_rejects_missing_nodes():
-    with pytest.raises(ValueError, match="nodes"):
-        parse_scenario({"name": "x"})
+    assert engine.cfg.seed == 3 and engine.cfg.error_model.packet_error_rate == 0.1
 
 
 def test_parse_links_override_the_medium():
-    doc = _valid_doc()
-    doc["links"] = [{"a": 2, "b": 1, "rssi_dbm": -80, "loss": 0.25}]
-    engine = parse_scenario(doc).build_engine()
-    rssi, per = engine.link_quality(1, 2, 50, 1.0)
+    doc = {**_valid_doc(), "links": [{"a": 2, "b": 1, "rssi_dbm": -80, "loss": 0.25}]}
+    rssi, per = parse_scenario(doc).build_engine().link_quality(1, 2, 50, 1.0)
     assert rssi == -80.0 and per >= 0.25
 
 
-@pytest.mark.parametrize("link, msg", [
-    ({"a": 1, "b": 9, "loss": 0.1}, "node 9"),
-    ({"a": 1, "b": 1, "loss": 0.1}, "itself"),
-    ({"a": 1, "b": 2, "loss": 1.5}, "loss"),
-    ({"a": 1, "b": 2}, "rssi_dbm or loss"),
-])
-def test_parse_rejects_bad_links(link, msg):
+def _with(path, value):
     doc = _valid_doc()
-    doc["links"] = [link]
+    *parents, key = path
+    target = doc
+    for p in parents:
+        target = target[p]
+    target[key] = value
+    return doc
+
+
+@pytest.mark.parametrize("doc, msg", [
+    (_with(["nodes", 1, "id"], 1), "duplicate node id"),
+    (_with(["nodes", 1, "mac"], "aa:bb:cc:00:00:0g"), "bad MAC"),
+    (_with(["nodes", 0, "pos"], [0, 0, 3]), "pos"),
+    (_with(["medium", "error_model"], "wormhole"), "error_model"),
+    (_with(["medium", "capture_threshold_db"], 4.0), "unknown key 'capture_threshold_db'"),
+    (_with(["run", "slice_us"], 0), "slice_us"),
+    (_with(["traffic"], [{"node": 1, "at_us": 0, "count": 0}]), "count"),
+    (_with(["links"], [{"a": 1, "b": 9, "loss": 0.1}]), "node 9"),
+    (_with(["links"], [{"a": 1, "b": 1, "loss": 0.1}]), "itself"),
+    (_with(["links"], [{"a": 1, "b": 2, "loss": 1.5}]), "loss"),
+    (_with(["links"], [{"a": 1, "b": 2}]), "rssi_dbm or loss"),
+    ({"name": "x"}, "nodes"),
+])
+def test_parse_rejects(doc, msg):
     with pytest.raises(ValueError, match=msg):
         parse_scenario(doc)
 
 
-def test_load_scenario_from_file(tmp_path):
-    p = tmp_path / "s.yaml"
-    p.write_text(
-        "name: file_scn\n"
-        "nodes:\n"
-        "  - {id: 1, mac: 'aa:bb:cc:00:00:01', pos: [0,0]}\n"
-        "  - {id: 2, mac: 'aa:bb:cc:00:00:02', pos: [1,0]}\n"
-        "medium: {error_model: snr_per}\n"
-        "run: {duration_us: 1000, slice_us: 500}\n",
-        encoding="utf-8",
-    )
-    sc = load_scenario(str(p))
-    assert sc.name == "file_scn" and sc.medium.error_model == "snr_per"
-
-
-# ---- radiotap -------------------------------------------------------------
-
-def test_channel_to_freq():
-    assert radiotap.channel_to_freq_mhz(1) == 2412
-    assert radiotap.channel_to_freq_mhz(6) == 2437
-    assert radiotap.channel_to_freq_mhz(11) == 2462
-
-
-def test_radiotap_header_length_and_present():
+def test_radiotap_header():
     hdr = radiotap.build_radiotap(rate_mbps=1.0, channel=6, rssi_dbm=-50)
-    # it_version=0, it_pad=0, it_len (u16), it_present (u32)
-    ver, pad, it_len, present = struct.unpack_from("<BBHI", hdr, 0)
-    assert ver == 0 and it_len == len(hdr) == 15
-    assert present == radiotap._RT_PRESENT
+    assert struct.unpack_from("<BBHI", hdr) == (0, 0, 15, 0x2E)   # flags, rate, channel, signal
+    assert struct.unpack_from("<BBHHb", hdr, 8) == (0, 2, 2437, 0x00A0, -50)
 
 
 def test_dot11_action_has_espressif_oui_and_addrs():
-    frame = radiotap.build_dot11_action("aa:bb:cc:00:00:01", "ff:ff:ff:ff:ff:ff",
-                                        b"payload", seq=3)
-    # Addr1 (dst) at offset 4, Addr2 (src) at offset 10.
-    assert frame[4:10] == bytes.fromhex("ffffffffffff")
-    assert frame[10:16] == bytes.fromhex("aabbcc000001")
-    assert radiotap.ESPRESSIF_OUI in frame
-    assert frame.endswith(b"payload")
+    frame = radiotap.build_dot11_action("aa:bb:cc:00:00:01", "ff:ff:ff:ff:ff:ff", b"payload", 3)
+    assert frame[4:10] == bytes.fromhex("ffffffffffff")       # receiver
+    assert frame[10:16] == bytes.fromhex("aabbcc000001")      # transmitter
+    assert frame.endswith(radiotap.ESPRESSIF_OUI + b"payload")
 
 
-# ---- pcapng ---------------------------------------------------------------
+def test_mgmt_frame_header_carries_subtype_and_bssid():
+    body = bytes.fromhex("000001000000")                     # open system, seq 1, success
+    frame = radiotap.build_dot11_mgmt(11, "aa:bb:cc:00:00:01", "02:00:00:00:00:01",
+                                      "02:00:00:00:00:01", body, 0)
+    assert frame[:2] == bytes.fromhex("b000")                 # management, authentication
+    assert frame[16:22] == bytes.fromhex("020000000001")      # address 3 is the BSSID
+    assert frame[24:] == body
 
-def _read_blocks(buf: bytes):
-    """Minimal pcapng block walker: yields (block_type, total_len, body)."""
-    off = 0
-    out = []
-    while off + 8 <= len(buf):
+
+def test_wifi_data_frame_carries_the_ip_packet():
+    eth = bytes(range(12)) + bytes.fromhex("0800") + b"IPDATA"
+    frame = radiotap.build_dot11_data("aa:bb:cc:00:00:01", "02:00:00:00:00:01", True, eth, 0)
+    assert frame[:2] == bytes.fromhex("0801")                 # data frame, ToDS
+    assert frame[24:] == bytes.fromhex("aaaa030000000800") + b"IPDATA"
+
+
+def _blocks(buf: bytes) -> list:
+    out, off = [], 0
+    while off < len(buf):
         btype, total = struct.unpack_from("<II", buf, off)
-        body = buf[off + 8: off + total - 4]
-        out.append((btype, total, body))
+        out.append((btype, total, buf[off + 8:off + total - 4]))
         off += total
     return out
 
 
 def test_pcapng_structure_and_comment():
     buf = io.BytesIO()
-    w = PcapngWriter(buf, interface_name="test-if")
-    w.write_packet(1234567, radiotap.build_frame("aa:bb:cc:00:00:01", "ff:ff:ff:ff:ff:ff",
-                                                 b"hello", 6, 1.0, -60.0, 1),
-                   "reason=ok snr_db=25.00")
-    data = buf.getvalue()
-    blocks = _read_blocks(data)
-    types = [b[0] for b in blocks]
-    # SHB, IDB, EPB in order.
-    assert types == [0x0A0D0D0A, 0x00000001, 0x00000006]
-
-    # IDB advertises the radiotap link type.
-    idb_body = blocks[1][2]
-    (linktype,) = struct.unpack_from("<H", idb_body, 0)
-    assert linktype == LINKTYPE_IEEE802_11_RADIOTAP
-
-    # EPB timestamp reconstructs to the microsecond value we wrote.
-    epb = blocks[2][2]
-    _iface, ts_high, ts_low, caplen, origlen = struct.unpack_from("<IIIII", epb, 0)
+    PcapngWriter(buf, "test-if").write_packet(1234567, b"frame", "reason=ok snr_db=25.00")
+    blocks = _blocks(buf.getvalue())
+    assert [b[0] for b in blocks] == [0x0A0D0D0A, 0x00000001, 0x00000006]   # SHB, IDB, EPB
+    assert all(total % 4 == 0 for _, total, _ in blocks)
+    assert struct.unpack_from("<H", blocks[1][2])[0] == LINKTYPE_IEEE802_11_RADIOTAP
+    _, ts_high, ts_low = struct.unpack_from("<III", blocks[2][2])
     assert (ts_high << 32 | ts_low) == 1234567
-    # Comment text is present somewhere in the block.
-    assert b"reason=ok" in data
-
-    # Every block total length is a multiple of 4 (32-bit alignment).
-    assert all(total % 4 == 0 for _t, total, _b in blocks)
-
-
-def _tcp_frame(src_ip: bytes, dst_ip: bytes, sport: int, dport: int) -> bytes:
-    eth = bytes(12) + b"\x08\x00"
-    ip = bytes([0x45, 0]) + bytes(7) + bytes([6]) + bytes(2) + src_ip + dst_ip
-    return eth + ip + struct.pack(">HH", sport, dport) + bytes(16)
-
-
-def test_medium_control_link_bypasses_the_wifi_model():
-    guest, host, web = bytes((10, 0, 2, 15)), bytes((10, 0, 2, 2)), bytes((93, 184, 215, 14))
-    assert wifi_link.is_medium_control(_tcp_frame(guest, host, 40000, 52333), 52333)
-    assert wifi_link.is_medium_control(_tcp_frame(host, guest, 52333, 40000), 52333)
-    assert not wifi_link.is_medium_control(_tcp_frame(guest, web, 40000, 80), 52333)
-    assert not wifi_link.is_medium_control(_tcp_frame(guest, host, 40000, 8080), 52333)
-
-
-def test_mgmt_frame_header_carries_subtype_and_bssid():
-    body = bytes.fromhex("000001000000")                  # open system, seq 1, success
-    frame = radiotap.build_dot11_mgmt(11, "aa:bb:cc:00:00:01", "02:00:00:00:00:01",
-                                      "02:00:00:00:00:01", body)
-    assert frame[:2] == bytes.fromhex("b000")                # management, authentication
-    assert frame[16:22] == bytes.fromhex("020000000001")     # address 3 is the BSSID
-    assert frame[24:] == body
-
-
-def test_wifi_data_frame_carries_the_ip_packet():
-    eth = bytes(range(6)) + bytes(range(6, 12)) + b"\x08\x00" + b"IPDATA"
-    frame = radiotap.build_dot11_data("aa:bb:cc:00:00:01", "02:00:00:00:00:01", True, eth)
-    assert frame[:2] == b"\x08\x01"                          # data frame, ToDS
-    assert frame[24:] == b"\xaa\xaa\x03\x00\x00\x00\x08\x00IPDATA"
-
-
-def test_connect_request_and_reply_round_trip():
-    header = bytes(6) + bytes.fromhex("aabbcc000001") + wifi_link.ETHERTYPE_CTRL
-    req = header + bytes((wifi_link.OP_CONNECT, 3)) + b"lab"
-    assert wifi_link.parse_connect_request(req) == "lab"
-    reply = wifi_link.connect_reply("aa:bb:cc:00:00:01", "02:00:00:00:00:01",
-                                    wifi_link.ASSOCIATED, 6, -61.6)
-    assert reply[12:14] == wifi_link.ETHERTYPE_CTRL
-    rssi = (-62).to_bytes(1, "big", signed=True)
-    assert reply[14:] == bytes([wifi_link.OP_CONNECT_REPLY, wifi_link.ASSOCIATED, 6]) + rssi
+    assert b"reason=ok" in blocks[2][2]

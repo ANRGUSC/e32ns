@@ -1,89 +1,52 @@
 """Radiotap + 802.11 frames for Wireshark: ESP-NOW as a vendor action frame (its shape, not
-its exact bytes) and Wi-Fi as data frames (D-016)."""
+its exact bytes), Wi-Fi as management and data frames (D-016)."""
 
 from __future__ import annotations
 
 import struct
 
-from ..protocol import normalize_mac
+from ..protocol import mac_bytes
 
-ESPRESSIF_OUI = bytes((0x18, 0xFE, 0x34))  # Espressif vendor OUI
-
-# radiotap "present" field bits we populate
-_RT_FLAGS = 1 << 1
-_RT_RATE = 1 << 2
-_RT_CHANNEL = 1 << 3
-_RT_DBM_ANTSIGNAL = 1 << 5
-_RT_PRESENT = _RT_FLAGS | _RT_RATE | _RT_CHANNEL | _RT_DBM_ANTSIGNAL  # 0x2E
-
-# radiotap channel flags: 2 GHz + Dynamic CCK-OFDM is overkill; mark 2GHz + CCK.
-_CHAN_FLAG_2GHZ = 0x0080
-_CHAN_FLAG_CCK = 0x0020
+ESPRESSIF_OUI = bytes((0x18, 0xFE, 0x34))
+_RT_PRESENT = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5)   # flags, rate, channel, dBm signal
+_CHAN_2GHZ_CCK = 0x0080 | 0x0020
+_LLC_SNAP = bytes((0xAA, 0xAA, 0x03, 0, 0, 0))
 
 
 def channel_to_freq_mhz(channel: int) -> int:
-    """2.4 GHz channel number -> centre frequency in MHz (ch1=2412, 5 MHz spacing)."""
+    """2.4 GHz channel number to its centre frequency in MHz."""
     return 2412 + (channel - 1) * 5
 
 
 def build_radiotap(rate_mbps: float, channel: int, rssi_dbm: float) -> bytes:
     """A 15-byte radiotap header: flags, rate, channel, and dBm antenna signal."""
-    flags = 0x00
-    rate = int(round(rate_mbps * 2))  # 500 kbps units: 1 Mbps -> 2
-    freq = channel_to_freq_mhz(channel)
-    chan_flags = _CHAN_FLAG_2GHZ | _CHAN_FLAG_CCK
-    signal = int(round(rssi_dbm))
-    signal = max(-128, min(127, signal))
-
-    body = struct.pack("<BB", flags, rate)          # off 8,9
-    body += struct.pack("<HH", freq, chan_flags)    # off 10..13
-    body += struct.pack("<b", signal)               # off 14
-    it_len = 8 + len(body)
-    header = struct.pack("<BBH I", 0, 0, it_len, _RT_PRESENT)
-    return header + body
+    signal = max(-128, min(127, round(rssi_dbm)))
+    # The rate field counts 500 kbps units.
+    return struct.pack("<BBHIBBHHb", 0, 0, 15, _RT_PRESENT, 0, round(rate_mbps * 2),
+                       channel_to_freq_mhz(channel), _CHAN_2GHZ_CCK, signal)
 
 
-def build_dot11_action(src_mac: str, dst_mac: str, payload: bytes,
-                       seq: int = 0) -> bytes:
+def _header(control: tuple[int, int], addrs: tuple[bytes, bytes, bytes], seq: int) -> bytes:
+    return (struct.pack("<BBH", *control, 0) + b"".join(addrs)
+            + struct.pack("<H", (seq & 0x0FFF) << 4))
+
+
+def build_dot11_action(src_mac: str, dst_mac: str, payload: bytes, seq: int) -> bytes:
     """An 802.11 vendor-specific action frame (Espressif OUI) carrying `payload`."""
-    frame_control = struct.pack("<BB", 0xD0, 0x00)
-    duration = struct.pack("<H", 0)
-    a1 = bytes.fromhex(normalize_mac(dst_mac).replace(":", ""))  # receiver
-    a2 = bytes.fromhex(normalize_mac(src_mac).replace(":", ""))  # transmitter
-    a3 = a2                                                       # BSSID ~ src
-    seq_ctrl = struct.pack("<H", (seq & 0x0FFF) << 4)
-    mac_header = frame_control + duration + a1 + a2 + a3 + seq_ctrl
-
-    category = struct.pack("<B", 127)  # vendor-specific action
-    body = category + ESPRESSIF_OUI + payload
-    return mac_header + body
-
-
-def build_frame(src_mac: str, dst_mac: str, payload: bytes, channel: int,
-                rate_mbps: float, rssi_dbm: float, seq: int = 0) -> bytes:
-    """radiotap header + synthesized 802.11 action frame (the pcapng packet data)."""
-    return (build_radiotap(rate_mbps, channel, rssi_dbm)
-            + build_dot11_action(src_mac, dst_mac, payload, seq))
+    src = mac_bytes(src_mac)
+    return _header((0xD0, 0), (mac_bytes(dst_mac), src, src), seq) + bytes((127,)) + ESPRESSIF_OUI + payload
 
 
 def build_dot11_mgmt(subtype: int, src_mac: str, dst_mac: str, bssid: str, body: bytes,
-                     seq: int = 0) -> bytes:
+                     seq: int) -> bytes:
     """An 802.11 management frame (probe, auth, assoc) with its fixed fields and IEs in body."""
-    addrs = b"".join(bytes.fromhex(normalize_mac(m).replace(":", ""))
-                     for m in (dst_mac, src_mac, bssid))
-    seq_ctrl = struct.pack("<H", (seq & 0x0FFF) << 4)
-    return struct.pack("<BBH", subtype << 4, 0, 0) + addrs + seq_ctrl + body
+    addrs = (mac_bytes(dst_mac), mac_bytes(src_mac), mac_bytes(bssid))
+    return _header((subtype << 4, 0), addrs, seq) + body
 
 
-def build_dot11_data(src_mac: str, dst_mac: str, to_ds: bool, eth_frame: bytes,
-                     seq: int = 0) -> bytes:
+def build_dot11_data(src_mac: str, dst_mac: str, to_ds: bool, eth_frame: bytes, seq: int) -> bytes:
     """An 802.11 data frame between a station and its AP carrying an Ethernet frame's payload."""
-    ethertype, body = eth_frame[12:14], eth_frame[14:]
-    flags = 0x01 if to_ds else 0x02   # ToDS: station to AP; FromDS: AP to station
-    a1 = bytes.fromhex(normalize_mac(dst_mac).replace(":", ""))
-    a2 = bytes.fromhex(normalize_mac(src_mac).replace(":", ""))
-    a3 = eth_frame[0:6] if to_ds else eth_frame[6:12]   # final destination / original source
-    seq_ctrl = struct.pack("<H", (seq & 0x0FFF) << 4)
-    header = struct.pack("<BBH", 0x08, flags, 0) + a1 + a2 + a3 + seq_ctrl
-    llc_snap = b"\xaa\xaa\x03\x00\x00\x00" + ethertype
-    return header + llc_snap + body
+    # ToDS (station to AP) names the final destination; FromDS names the original source.
+    addrs = (mac_bytes(dst_mac), mac_bytes(src_mac), eth_frame[0:6] if to_ds else eth_frame[6:12])
+    return (_header((0x08, 0x01 if to_ds else 0x02), addrs, seq) + _LLC_SNAP + eth_frame[12:14]
+            + eth_frame[14:])

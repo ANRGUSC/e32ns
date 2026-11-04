@@ -10,9 +10,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..config.schema import ScenarioConfig
-from ..medium import TxOutcome
+from ..medium import AP_NODE_ID, TxOutcome
 from ..nodes.mock_node import MockNode
-from ..trace.pcapng import PcapngWriter, TraceRecorder
+from ..trace.pcapng import PcapngWriter, trace_hook
 from ..trace.report import write_report
 from . import qemu_launcher, wifi_link
 from .simulation import Simulation, SimStats
@@ -43,7 +43,7 @@ def _mock_nodes(scenario: ScenarioConfig, port: int) -> dict[int, MockNode]:
              for n in scenario.nodes if n.firmware is None}
     seq = dict.fromkeys(nodes, 0)
     for tc in scenario.traffic:
-        for k in range(max(1, tc.count)):
+        for k in range(tc.count):
             seq[tc.node_id] += 1
             nodes[tc.node_id].schedule_tx(
                 t_us=tc.at_us + k * tc.period_us, dst_mac=tc.dst,
@@ -63,7 +63,7 @@ async def _run_nodes(scenario: ScenarioConfig, sim: Simulation, out: Path) -> Si
                 if n.firmware:
                     q = await qemu_launcher.launch(n, port, Path(workdir))
                     qemu.append(q)
-                    sim.register_qemu_node(q.node_id, q.qmp)
+                    sim.qemu_nodes[q.node_id] = q.qmp
                     if n.wifi:
                         pumps += await wifi_link.bridge(sim, n, scenario.ap, q.wifi_sockets)
             for m in mocks.values():
@@ -85,31 +85,31 @@ async def _run_nodes(scenario: ScenarioConfig, sim: Simulation, out: Path) -> Si
             await m.close()
 
 
-def write_results(scenario: ScenarioConfig, result: RunResult) -> None:
+def write_results(scenario: ScenarioConfig, result: RunResult) -> dict:
     """Write results.json: topology, aggregate stats, and every per-receiver verdict."""
     nodes = [{"id": n.node_id, "mac": n.mac, "pos": [n.x, n.y], "channel": n.channel,
               "firmware": Path(n.firmware).parent.name if n.firmware else "mock"}
              for n in scenario.nodes]
     if scenario.ap:
         ap = scenario.ap
-        nodes.append({"id": ap.node_id, "mac": ap.mac, "pos": [ap.x, ap.y],
+        nodes.append({"id": AP_NODE_ID, "mac": ap.mac, "pos": [ap.x, ap.y],
                       "channel": ap.channel, "firmware": "access point"})
     doc = {"name": scenario.name, "duration_us": scenario.duration_us,
            "slice_us": scenario.slice_us, "nodes": nodes,
            "stats": asdict(result.stats), "events": result.events}
     (result.out_dir / "results.json").write_text(json.dumps(doc, indent=1))
+    return doc
 
 
 async def run_scenario(scenario: ScenarioConfig) -> RunResult:
     out = Path(scenario.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    sim = Simulation(scenario.build_engine(), slice_us=scenario.slice_us, port=scenario.port)
+    sim = Simulation(scenario.build_engine(), scenario.slice_us)
     events: list[dict] = []
-    sim.add_outcome_hook(lambda o: events.extend(outcome_rows(o)))
+    sim.outcome_hooks.append(lambda o: events.extend(outcome_rows(o)))
     with open(out / "trace.pcapng", "wb") as trace_fp:
-        sim.add_outcome_hook(TraceRecorder(PcapngWriter(trace_fp, scenario.name)).on_outcome)
+        sim.outcome_hooks.append(trace_hook(PcapngWriter(trace_fp, scenario.name)))
         stats = await _run_nodes(scenario, sim, out)
     result = RunResult(stats, out, events)
-    write_results(scenario, result)
-    write_report(out)
+    write_report(out, write_results(scenario, result))
     return result

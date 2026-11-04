@@ -4,7 +4,7 @@
 # except on the pairs under links:, where the user sets RSSI or loss directly.
 name: example_20_nodes
 
-wifi_ap: { pos: [150, 350], channel: 1 }
+wifi_ap: { pos: [150, 350] }
 
 nodes:
   - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0, 0], firmware: ../firmware/examples/espnow_ping/build }
@@ -32,9 +32,6 @@ links:
   - { a: 1, b: 13, rssi_dbm: -75 }     # line of sight down the column: 1 reaches a pong 300 m away
   - { a: 10, b: 11, rssi_dbm: -120 }   # a wall between neighbours 100 m apart
   - { a: 20, b: 0, loss: 0.3 }         # station 20's AP link drops 30 % of attempts
-
-medium:
-  error_model: snr_per
 
 run:
   duration_us: 5000000

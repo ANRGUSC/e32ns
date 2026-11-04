@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from .config.schema import parse_scenario
+from .medium import AP_NODE_ID
 
 PAGE = Path(__file__).with_name("editor.html")
 ESPNOW_PROBE = (50, 1.0)   # bytes, Mbps: a typical ESP-NOW payload at the ESP-NOW rate
@@ -23,7 +24,7 @@ def predicted_links(doc: dict, base_dir: str) -> list[dict]:
     pairs = [(a.node_id, b.node_id, ESPNOW_PROBE, False)
              for a, b in combinations(sc.nodes, 2) if a.channel == b.channel]
     if sc.ap:
-        pairs += [(n.node_id, sc.ap.node_id, WIFI_PROBE, True) for n in sc.nodes if n.wifi]
+        pairs += [(n.node_id, AP_NODE_ID, WIFI_PROBE, True) for n in sc.nodes if n.wifi]
     overridden = {frozenset((l.a, l.b)) for l in sc.links}
     links = []
     for a, b, (nbytes, rate), wifi in pairs:
@@ -45,7 +46,7 @@ _Dumper.add_representer(list, lambda d, v: d.represent_sequence(
 def dump_scenario(doc: dict, header: str) -> str:
     """Scenario YAML under the original leading comments, one flow-style line per node."""
     def block(d: dict) -> str:
-        return yaml.dump(d, Dumper=_Dumper, sort_keys=False, default_flow_style=False) if d else ""
+        return yaml.dump(d, Dumper=_Dumper, sort_keys=False, default_flow_style=False)
     nodes = "".join(f"  - {yaml.safe_dump(n, sort_keys=False, default_flow_style=True, width=200)}"
                     for n in doc["nodes"])
     rest = {k: v for k, v in doc.items() if k not in ("name", "nodes")}

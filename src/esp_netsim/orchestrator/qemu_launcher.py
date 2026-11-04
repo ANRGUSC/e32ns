@@ -49,11 +49,11 @@ class QmpClient:
             if not resp or "return" in resp or "error" in resp:
                 return resp
 
-    async def cont(self) -> dict:
-        return await self._execute("cont")
+    async def cont(self) -> None:
+        await self._execute("cont")
 
-    async def stop(self) -> dict:
-        return await self._execute("stop")
+    async def stop(self) -> None:
+        await self._execute("stop")
 
 
 @dataclass

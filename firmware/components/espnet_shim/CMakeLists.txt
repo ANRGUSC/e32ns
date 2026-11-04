@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS "espnet_shim.c"
-    REQUIRES esp_wifi esp_timer esp_eth esp_netif esp_event nvs_flash lwip freertos log)
+    REQUIRES esp_wifi esp_timer esp_eth esp_netif esp_event nvs_flash lwip)
 
 # --wrap is required: component-provided esp_now_* symbols lose to IDF's archive (D-021).
 set(ESPNET_WRAPPED

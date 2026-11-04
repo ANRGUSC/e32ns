@@ -1,10 +1,8 @@
 /*
- * espnet_shim: redirects esp_now_* and the Wi-Fi bring-up calls an ESP-NOW app makes to the
- * host medium, so an unmodified hardware app runs under QEMU (D-028).
- *
- * Linked via -Wl,--wrap (component-provided symbols lose to IDF's archive). Node
- * identity comes from the NVS namespace "espnet", written per node by the host launcher.
- * Wire layout mirrors src/esp_netsim/protocol.py: big-endian, 4-byte length prefix.
+ * espnet_shim: redirects esp_now_* and the Wi-Fi bring-up calls to the host medium, so an
+ * unmodified hardware app runs under QEMU (D-028). Node identity comes from the NVS namespace
+ * "espnet", written per node by the host launcher. Wire layout mirrors protocol.py's _LAYOUT:
+ * big-endian, 4-byte length prefix.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -31,12 +29,11 @@ enum { T_HELLO = 1, T_ADD_PEER = 3, T_DEL_PEER = 4, T_TX = 5, T_TX_STATUS = 6, T
        T_SHUTDOWN = 10 };
 
 typedef struct __attribute__((packed)) {
-    uint8_t tag; uint16_t node; uint8_t mac[6]; uint8_t caps;
+    uint8_t tag; uint16_t node; uint8_t mac[6];
 } hello_msg_t;
 
 typedef struct __attribute__((packed)) {
-    uint8_t tag; uint16_t node; uint8_t peer[6]; uint8_t channel; uint8_t encrypt;
-    uint8_t lmk[16];
+    uint8_t tag; uint16_t node; uint8_t peer[6]; uint8_t encrypt; uint8_t lmk[16];
 } add_peer_msg_t;
 
 typedef struct __attribute__((packed)) {
@@ -45,16 +42,16 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     uint8_t tag; uint16_t node; uint64_t t; uint8_t src[6]; uint8_t dst[6]; uint8_t channel;
-    uint32_t rate; uint32_t seq; uint16_t len; uint8_t data[ESP_NOW_MAX_DATA_LEN];
+    uint32_t seq; uint16_t len; uint8_t data[ESP_NOW_MAX_DATA_LEN];
 } tx_msg_t;
 
 typedef struct __attribute__((packed)) {
-    uint8_t tag; uint16_t node; uint32_t seq; uint8_t status; uint64_t t;
+    uint8_t tag; uint16_t node; uint32_t seq; uint8_t status;
 } tx_status_msg_t;
 
 typedef struct __attribute__((packed)) {
     uint8_t tag; uint16_t node; uint64_t t; uint8_t src[6]; uint8_t dst[6]; uint8_t channel;
-    uint32_t rate; uint32_t rssi; uint16_t len; uint8_t data[];
+    uint32_t rssi; uint16_t len; uint8_t data[];
 } rx_msg_t;
 
 /* A station's connect request and the Wi-Fi bridge's reply ride the NIC as Ethernet frames with
@@ -96,7 +93,6 @@ static StaticEventGroup_t s_eg_mem;
 static StackType_t s_rx_stack[4096];
 static StaticTask_t s_rx_task;
 
-static uint32_t f32_be(float f) { uint32_t u; memcpy(&u, &f, 4); return __builtin_bswap32(u); }
 static float be_f32(uint32_t be) { uint32_t u = __builtin_bswap32(be); float f; memcpy(&f, &u, 4); return f; }
 
 static void send_msg(const void *body, size_t len) {
@@ -122,12 +118,8 @@ static void load_identity(void) {
 
 static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data) {
     xEventGroupSetBits(s_eg, BIT0);
-    /* Station apps wait for Wi-Fi events; the open_eth NIC stands in for the station. */
-    if (!s_associated) {
-        wifi_event_sta_connected_t connected = { .channel = s_id.channel };
-        esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &connected, sizeof connected, 0);
-    }
-    esp_event_post(IP_EVENT, IP_EVENT_STA_GOT_IP, data, sizeof(ip_event_got_ip_t), 0);
+    /* A station's app waits for the Wi-Fi event; the open_eth NIC stands in for the station. */
+    if (s_associated) esp_event_post(IP_EVENT, IP_EVENT_STA_GOT_IP, data, sizeof(ip_event_got_ip_t), 0);
 }
 
 static void send_connect(void) {
@@ -200,9 +192,11 @@ static void ethernet_init(void) {
                                                on_link_up, NULL));
 }
 
-static void ethernet_start(void) {
+/* A station holds DHCP until the AP accepts it; ESP-NOW needs an address at once. */
+static void ethernet_start(bool dhcp) {
     ethernet_init();
     if (!s_eth_started) {
+        if (!dhcp) esp_netif_dhcpc_stop(s_netif);
         ESP_ERROR_CHECK(esp_eth_start(s_eth));
         s_eth_started = true;
     }
@@ -258,12 +252,12 @@ static void reader_task(void *arg) {
 }
 
 esp_err_t __wrap_esp_now_init(void) {
-    ethernet_start();
+    ethernet_start(true);
     xEventGroupWaitBits(s_eg, BIT0, pdFALSE, pdTRUE, portMAX_DELAY);
     connect_medium();
     ESP_LOGI(TAG, "node %u " MACSTR " ch %u on medium port %u",
              s_id.node_id, MAC2STR(s_id.mac), s_id.channel, s_id.port);
-    hello_msg_t m = { .tag = T_HELLO, .node = __builtin_bswap16(s_id.node_id), .caps = 0x01 };
+    hello_msg_t m = { .tag = T_HELLO, .node = __builtin_bswap16(s_id.node_id) };
     memcpy(m.mac, s_id.mac, 6);
     send_msg(&m, sizeof m);
     xTaskCreateStatic(reader_task, "espnet_rx", sizeof s_rx_stack, NULL, 5, s_rx_stack, &s_rx_task);
@@ -279,7 +273,7 @@ esp_err_t __wrap_esp_now_set_pmk(const uint8_t *pmk) { return ESP_OK; }
 
 esp_err_t __wrap_esp_now_add_peer(const esp_now_peer_info_t *peer) {
     add_peer_msg_t m = { .tag = T_ADD_PEER, .node = __builtin_bswap16(s_id.node_id),
-                         .channel = peer->channel, .encrypt = peer->encrypt };
+                         .encrypt = peer->encrypt };
     memcpy(m.peer, peer->peer_addr, 6);
     if (peer->encrypt) memcpy(m.lmk, peer->lmk, 16);
     send_msg(&m, sizeof m);
@@ -298,7 +292,7 @@ esp_err_t __wrap_esp_now_send(const uint8_t *peer_addr, const uint8_t *data, siz
     if (len > ESP_NOW_MAX_DATA_LEN) return ESP_ERR_ESPNOW_ARG;
     tx_msg_t m = { .tag = T_TX, .node = __builtin_bswap16(s_id.node_id),
                    .t = __builtin_bswap64((uint64_t)esp_timer_get_time()),
-                   .channel = s_id.channel, .rate = f32_be(1.0f),
+                   .channel = s_id.channel,
                    .seq = __builtin_bswap32(++s_seq), .len = __builtin_bswap16((uint16_t)len) };
     memcpy(m.src, s_id.mac, 6);
     memcpy(m.dst, peer_addr ? peer_addr : BCAST, 6);
@@ -328,12 +322,7 @@ esp_err_t __wrap_esp_wifi_start(void) {
 
 /* Like the driver, return at once; CONNECTED or DISCONNECTED follows from the bridge's reply. */
 esp_err_t __wrap_esp_wifi_connect(void) {
-    ethernet_init();
-    if (!s_eth_started) {
-        esp_netif_dhcpc_stop(s_netif);  /* DHCP waits until the AP accepts the station */
-        ESP_ERROR_CHECK(esp_eth_start(s_eth));
-        s_eth_started = true;
-    }
+    ethernet_start(false);
     s_connect_pending = true;
     if (s_link_up) send_connect();
     return ESP_OK;

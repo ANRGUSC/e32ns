@@ -1,103 +1,67 @@
-"""Tests for the wire-protocol codec (protocol.py)."""
+"""The wire codec: MAC validation, framing, and the byte layout the C shim mirrors."""
+
+import struct
 
 import pytest
 
 from esp_netsim import protocol as p
 
 
-def test_normalize_mac_forms():
-    assert p.normalize_mac("AA:BB:CC:DD:EE:FF") == "aa:bb:cc:dd:ee:ff"
-    assert p.normalize_mac("aa-bb-cc-dd-ee-ff") == "aa:bb:cc:dd:ee:ff"
-    assert p.normalize_mac("aabbccddeeff") == "aa:bb:cc:dd:ee:ff"
+def test_normalize_mac():
+    assert p.normalize_mac(" AA:BB:CC:DD:EE:FF ") == "aa:bb:cc:dd:ee:ff"
 
 
-@pytest.mark.parametrize("bad", ["", "gg:bb:cc:dd:ee:ff", "aa:bb:cc", "aabbccddee"])
+@pytest.mark.parametrize("bad", ["", "gg:bb:cc:dd:ee:ff", "aa:bb:cc", "a_:bb:cc:dd:ee:ff",
+                                 "+a:bb:cc:dd:ee:ff", "aabbccddeeff"])
 def test_normalize_mac_rejects_garbage(bad):
     with pytest.raises(ValueError):
         p.normalize_mac(bad)
 
 
-def test_broadcast_detection():
-    assert p.is_broadcast("FF:FF:FF:FF:FF:FF")
-    assert not p.is_broadcast("aa:bb:cc:dd:ee:ff")
+def _tx(**kw):
+    fields = {"node": 2, "t": 0x0102, "src": "aa:bb:cc:dd:ee:01", "dst": p.BROADCAST_MAC,
+              "channel": 6, "seq": 9, "data": b"\x01\x02\x03"}
+    return p.Message(p.TX, {**fields, **kw})
 
 
-def test_roundtrip_tx_message():
-    payload = bytes(range(0, 250))  # ESP-NOW v1 max payload
-    msg = p.tx(node=1, t=1234, src="aa:bb:cc:00:00:01", dst=p.BROADCAST_MAC,
-              channel=6, rate_mbps=1.0, seq=7, data=payload)
-    frame = p.encode_frame(msg)
-    dec = p.FrameDecoder()
-    got = dec.feed(frame)
-    assert len(got) == 1
-    m = got[0]
-    assert m.type == p.TX
-    assert m.node == 1 and m.get("t") == 1234 and m.get("seq") == 7
-    assert m.get("data") == payload
-
-
-def test_decoder_handles_split_and_coalesced_streams():
-    msgs = [p.hello(1, "aa:bb:cc:dd:ee:01"),
-            p.tx(1, 10, "aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02", 6, 1.0, 1, b"hi"),
-            p.slice_done(1, 1000)]
+def test_decoder_reassembles_split_and_coalesced_streams():
+    msgs = [p.Message(p.HELLO, {"node": 1, "mac": "aa:bb:cc:dd:ee:01"}), _tx(data=bytes(250)),
+            p.Message(p.SLICE_DONE, {"node": 1, "t": 1000})]
     blob = b"".join(p.encode_frame(m) for m in msgs)
-
-    # Feed one byte at a time: decoder must reassemble exactly the 3 messages in order.
-    dec = p.FrameDecoder()
-    out = []
-    for i in range(len(blob)):
-        out.extend(dec.feed(blob[i : i + 1]))
-    assert [m.type for m in out] == [p.HELLO, p.TX, p.SLICE_DONE]
-
-    # Feed everything in one chunk: same result.
-    dec2 = p.FrameDecoder()
-    out2 = dec2.feed(blob)
-    assert [m.type for m in out2] == [p.HELLO, p.TX, p.SLICE_DONE]
+    byte_by_byte = p.FrameDecoder()
+    out = [m for i in range(len(blob)) for m in byte_by_byte.feed(blob[i:i + 1])]
+    assert out == msgs
+    assert p.FrameDecoder().feed(blob) == msgs
 
 
 def test_decoder_rejects_oversize_length_prefix():
-    bogus = p.LENGTH_PREFIX.pack(p.MAX_MESSAGE_BYTES + 1)
-    dec = p.FrameDecoder()
     with pytest.raises(ValueError):
-        dec.feed(bogus)
+        p.FrameDecoder().feed(p.LENGTH_PREFIX.pack(p.MAX_MESSAGE_BYTES + 1))
 
 
-def test_binary_wire_layout_is_locked():
-    """Byte-level layout the C shim must match (keep C and Python in sync)."""
-    import struct
-    # TX: tag(5) | node(u16) | t(u64) | src(6) | dst(6) | ch(u8) | rate(f32) |
-    #     seq(u32) | dlen(u16) | data
-    m = p.tx(node=2, t=0x0102, src="aa:bb:cc:dd:ee:01", dst="ff:ff:ff:ff:ff:ff",
-             channel=6, rate_mbps=1.0, seq=9, data=b"\x01\x02\x03")
-    body = p.encode_body(m)
-    assert body[0] == p._TAG[p.TX] == 5
-    assert struct.unpack_from(">H", body, 1)[0] == 2         # node
-    assert struct.unpack_from(">Q", body, 3)[0] == 0x0102    # t
-    assert body[11:17] == bytes.fromhex("aabbccddee01")      # src mac
-    assert body[17:23] == b"\xff" * 6                        # dst mac
-    assert body[23] == 6                                     # channel
-    assert struct.unpack_from(">f", body, 24)[0] == 1.0      # rate
-    assert struct.unpack_from(">I", body, 28)[0] == 9        # seq
-    assert struct.unpack_from(">H", body, 32)[0] == 3        # data len
-    assert body[34:37] == b"\x01\x02\x03"                    # data
+def test_tx_layout_is_locked():
+    # tag | node u16 | t u64 | src 6 | dst 6 | channel u8 | seq u32 | len u16 | data
+    body = p.encode_body(_tx())
+    assert body[0] == 5
+    assert struct.unpack_from(">HQ", body, 1) == (2, 0x0102)
+    assert body[11:17] == bytes.fromhex("aabbccddee01") and body[17:23] == b"\xff" * 6
+    assert struct.unpack_from(">BIH", body, 23) == (6, 9, 3)
+    assert body[30:] == b"\x01\x02\x03"
 
 
-def test_hello_and_slice_done_layout():
-    import struct
-    h = p.hello(1, "aa:bb:cc:00:00:01")
-    hb = p.encode_body(h)
-    assert hb[0] == 1 and struct.unpack_from(">H", hb, 1)[0] == 1
-    assert hb[3:9] == bytes.fromhex("aabbcc000001")
-    assert hb[9] == 0b01  # espnow set, wifi clear
-    sd = p.encode_body(p.slice_done(3, 5000))
-    assert sd[0] == p._TAG[p.SLICE_DONE]
-    assert struct.unpack_from(">HQ", sd, 1) == (3, 5000)
+def test_layouts_the_shim_parses_are_locked():
+    # RX: tag | node u16 | t u64 | src 6 | dst 6 | channel u8 | rssi f32 | len u16 | data
+    rx = p.encode_body(p.Message(p.RX, {"node": 1, "t": 7, "src": "aa:bb:cc:dd:ee:01",
+                                        "dst": p.BROADCAST_MAC, "channel": 6, "rssi_dbm": -60.5,
+                                        "data": b"hi"}))
+    assert rx[0] == 7 and struct.unpack_from(">Bf H", rx, 23)[:2] == (6, -60.5)
+    assert rx[-2:] == b"hi" and len(rx) == 32
+    # TX_STATUS: tag | node u16 | seq u32 | status u8
+    st = p.encode_body(p.Message(p.TX_STATUS, {"node": 1, "seq": 4, "status": p.STATUS_SUCCESS}))
+    assert st == bytes((6,)) + struct.pack(">HIB", 1, 4, 1)
 
 
-def test_add_peer_encrypt_carries_lmk():
+def test_add_peer_carries_encryption():
     lmk = bytes(range(16))
-    m = p.add_peer(2, "aa:bb:cc:dd:ee:02", channel=6, encrypt=True, lmk=lmk)
-    frame = p.encode_frame(m)
-    got = p.FrameDecoder().feed(frame)[0]
-    assert got.get("encrypt") is True
-    assert got.get("lmk") == lmk
+    m = p.Message(p.ADD_PEER, {"node": 2, "peer": "aa:bb:cc:dd:ee:02", "encrypt": True, "lmk": lmk})
+    assert p.FrameDecoder().feed(p.encode_frame(m)) == [m]

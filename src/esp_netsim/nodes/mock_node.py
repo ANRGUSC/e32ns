@@ -7,78 +7,61 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .. import protocol
-from ..protocol import Message, FrameDecoder, encode_frame
+from ..protocol import Message
+from ..transport.server import Connection
 
 
-@dataclass
+@dataclass(frozen=True)
 class ScheduledTx:
     t_us: int
     dst_mac: str
     payload: bytes
     seq: int
-    sent: bool = False
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReceivedFrame:
     t_us: int
-    src_mac: str
-    dst_mac: str
     rssi_dbm: float
     data: bytes
 
 
 class MockNode:
-    def __init__(self, node_id: int, mac: str, port: int, channel: int = 1,
-                 barrier_ack: bool = True):
+    """Sends its scheduled ESP-NOW frames, acks each slice, and records what reaches it."""
+
+    def __init__(self, node_id: int, mac: str, port: int, channel: int = 1):
         self.node_id = node_id
-        self.mac = protocol.normalize_mac(mac)
+        self.mac = mac
         self.port = port
         self.channel = channel
-        # When False, the node ignores RUN_SLICE and does not send SLICE_DONE — used to
-        # stand in for a QEMU node, which is paused and resumed over QMP instead.
-        self.barrier_ack = barrier_ack
-
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
-        self._decoder = FrameDecoder()
+        self.schedule: list[ScheduledTx] = []
+        self.received: list[ReceivedFrame] = []
+        self.send_status: dict[int, str] = {}   # seq -> send-callback status
+        self._conn: Optional[Connection] = None
         self._reader_task: Optional[asyncio.Task] = None
         self._welcomed = asyncio.Event()
 
-        self.schedule: list[ScheduledTx] = []
-        self.received: list[ReceivedFrame] = []
-        self.send_status: dict[int, str] = {}      # seq -> "success"/"fail"
-        self._running = True
-
     def schedule_tx(self, t_us: int, dst_mac: str, payload: bytes, seq: int) -> None:
-        """Queue a 1 Mbps ESP-NOW frame on this node's channel for virtual time t_us."""
-        self.schedule.append(ScheduledTx(t_us, protocol.normalize_mac(dst_mac), payload, seq))
+        """Queue an ESP-NOW frame for virtual time t_us."""
+        self.schedule.append(ScheduledTx(t_us, dst_mac, payload, seq))
 
     async def connect(self) -> None:
-        self._reader, self._writer = await asyncio.open_connection("127.0.0.1", self.port)
+        self._conn = Connection(*await asyncio.open_connection("127.0.0.1", self.port))
         self._reader_task = asyncio.create_task(self._read_loop())
-        await self._send(protocol.hello(self.node_id, self.mac))
+        await self._conn.send(Message(protocol.HELLO, {"node": self.node_id, "mac": self.mac}))
         await asyncio.wait_for(self._welcomed.wait(), timeout=5.0)
 
     async def close(self) -> None:
-        self._running = False
-        if self._writer is not None:
-            self._writer.close()
+        # The runner closes every mock, including any that never connected.
+        if self._conn is not None:
+            self._conn.close()
         if self._reader_task is not None:
             self._reader_task.cancel()
 
-    async def _send(self, msg: Message) -> None:
-        self._writer.write(encode_frame(msg))
-        await self._writer.drain()
-
     async def _read_loop(self) -> None:
         try:
-            while self._running:
-                chunk = await self._reader.read(65536)
-                if not chunk:
-                    return
-                for msg in self._decoder.feed(chunk):
-                    await self._handle(msg)
+            async for msg in self._conn.messages():
+                await self._handle(msg)
         except (asyncio.CancelledError, ConnectionError):
             return
 
@@ -86,28 +69,21 @@ class MockNode:
         if msg.type == protocol.WELCOME:
             self._welcomed.set()
         elif msg.type == protocol.RUN_SLICE:
-            await self._run_slice(msg.get("until_t"))
+            await self.emit_due(msg.get("until_t"))
+            await self._conn.send(Message(protocol.SLICE_DONE,
+                                          {"node": self.node_id, "t": msg.get("until_t")}))
         elif msg.type == protocol.TX_STATUS:
             self.send_status[msg.get("seq")] = msg.get("status")
         elif msg.type == protocol.RX:
-            self.received.append(ReceivedFrame(
-                t_us=msg.get("t"), src_mac=msg.get("src"), dst_mac=msg.get("dst"),
-                rssi_dbm=msg.get("rssi_dbm"), data=msg.get("data")))
+            self.received.append(ReceivedFrame(msg.get("t"), msg.get("rssi_dbm"), msg.get("data")))
         elif msg.type == protocol.SHUTDOWN:
             await self.close()
 
     async def emit_due(self, until_t: int) -> None:
-        """Send any scheduled transmissions whose virtual time is before ``until_t``."""
-        for tx in self.schedule:
-            if not tx.sent and tx.t_us < until_t:
-                await self._send(protocol.tx(
-                    self.node_id, tx.t_us, self.mac, tx.dst_mac, self.channel,
-                    1.0, tx.seq, tx.payload))
-                tx.sent = True
-
-    async def _run_slice(self, until_t: int) -> None:
-        """Emit due transmissions, then ack the barrier (a QEMU stand-in does neither)."""
-        if not self.barrier_ack:
-            return
-        await self.emit_due(until_t)
-        await self._send(protocol.slice_done(self.node_id, until_t))
+        """Send every scheduled frame due before until_t."""
+        due = [tx for tx in self.schedule if tx.t_us < until_t]
+        self.schedule = [tx for tx in self.schedule if tx.t_us >= until_t]
+        for tx in due:
+            await self._conn.send(Message(protocol.TX, {
+                "node": self.node_id, "t": tx.t_us, "src": self.mac, "dst": tx.dst_mac,
+                "channel": self.channel, "seq": tx.seq, "data": tx.payload}))

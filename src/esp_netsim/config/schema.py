@@ -1,29 +1,28 @@
-"""YAML scenario schema + fail-fast validation at the config boundary."""
+"""YAML scenario: parsed and validated once at load, then trusted."""
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
-from ..protocol import normalize_mac
+import yaml
+
+from ..channel import ConstantErrorModel, LogDistance, SnrPerErrorModel
 from ..medium import AP_NODE_ID, Link, MediumConfig, MediumEngine
-from ..channel.pathloss import LogDistance
-from ..channel.error_model import ConstantErrorModel, SnrPerErrorModel
-from ..channel.airtime import AirtimeModel
+from ..protocol import BROADCAST_MAC, normalize_mac
 
 
 @dataclass(frozen=True)
 class NodeConfig:
     node_id: int
     mac: str
-    x: float = 0.0
-    y: float = 0.0
-    z: float = 0.0
-    channel: int = 1
-    firmware: Optional[str] = None   # ESP-IDF build dir; None runs a MockNode
-    wifi: bool = False               # its IP traffic crosses the modeled link to the AP
+    x: float
+    y: float
+    channel: int
+    firmware: Optional[str]     # ESP-IDF build dir; None runs a MockNode
+    wifi: bool                  # its IP traffic crosses the modeled link to the AP
 
 
 @dataclass(frozen=True)
@@ -32,146 +31,129 @@ class AccessPoint:
     x: float
     y: float
     channel: int
-    ssid: str = "esp-netsim"
-    node_id: int = AP_NODE_ID
-
-
-@dataclass(frozen=True)
-class MediumConfigSpec:
-    error_model: str = "snr_per"          # constant | snr_per
-    packet_error_rate: float = 0.0
-    path_loss_exponent: float = 3.0
-    tx_power_dbm: float = 20.0
-    noise_figure_db: float = 7.0
-    capture_threshold_db: float = 4.0
-    max_retries: int = 34
-
-    def build(self, seed: int) -> MediumConfig:
-        if self.error_model == "constant":
-            em = ConstantErrorModel(self.packet_error_rate)
-        elif self.error_model == "snr_per":
-            em = SnrPerErrorModel()
-        else:
-            raise ValueError(f"medium.error_model must be constant|snr_per, "
-                             f"got {self.error_model!r}")
-        return MediumConfig(
-            propagation=LogDistance(self.path_loss_exponent, self.tx_power_dbm),
-            error_model=em, airtime=AirtimeModel(),
-            noise_figure_db=self.noise_figure_db,
-            capture_threshold_db=self.capture_threshold_db,
-            max_retries=self.max_retries, seed=seed,
-        )
+    ssid: str
 
 
 @dataclass(frozen=True)
 class TrafficConfig:
-    """A scripted transmission for a mock-node demo."""
+    """A scripted transmission for a mock node."""
 
     node_id: int
     at_us: int
     dst: str
-    size_bytes: int = 16
-    count: int = 1
-    period_us: int = 0
+    size_bytes: int
+    count: int
+    period_us: int
 
 
 @dataclass(frozen=True)
 class ScenarioConfig:
     name: str
     nodes: tuple
-    medium: MediumConfigSpec = field(default_factory=MediumConfigSpec)
-    duration_us: int = 1_000_000
-    slice_us: int = 1000
-    seed: int = 0
-    out_dir: str = "out"
-    port: int = 0
-    traffic: tuple = ()
-    ap: Optional[AccessPoint] = None
-    links: tuple = ()
+    medium: MediumConfig
+    duration_us: int
+    slice_us: int
+    seed: int
+    out_dir: str
+    traffic: tuple
+    ap: Optional[AccessPoint]
+    links: tuple
 
     def build_engine(self) -> MediumEngine:
-        engine = MediumEngine(self.medium.build(self.seed))
+        engine = MediumEngine(self.medium)
         for n in self.nodes:
-            engine.add_node(n.node_id, n.mac, n.x, n.y, n.z, n.channel)
+            engine.add_node(n.node_id, n.mac, n.x, n.y, n.channel)
         if self.ap:
-            engine.add_node(self.ap.node_id, self.ap.mac, self.ap.x, self.ap.y,
-                            channel=self.ap.channel, espnow=False)
+            engine.add_node(AP_NODE_ID, self.ap.mac, self.ap.x, self.ap.y, self.ap.channel,
+                            espnow=False)
         for link in self.links:
             engine.set_link(link)
         return engine
 
 
-def _require(d: dict, key: str, ctx: str):
+def _section(d: Any, ctx: str, allowed: set) -> dict:
+    if not isinstance(d, dict):
+        raise ValueError(f"{ctx} must be a mapping")
+    unknown = set(d) - allowed
+    if unknown:
+        raise ValueError(f"{ctx}: unknown key '{sorted(unknown)[0]}'")
+    return d
+
+
+def _require(d: dict, key: str, ctx: str) -> Any:
     if key not in d:
         raise ValueError(f"{ctx}: missing required key '{key}'")
     return d[key]
 
 
-def parse_scenario(doc: dict, base_dir: str = ".") -> ScenarioConfig:
-    if not isinstance(doc, dict):
-        raise ValueError("scenario must be a mapping at the top level")
+def _positive(value: Any, ctx: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise ValueError(f"{ctx} must be at least 1, got {n}")
+    return n
+
+
+def parse_scenario(doc: Any, base_dir: str = ".") -> ScenarioConfig:
+    doc = _section(doc, "scenario", {"name", "nodes", "wifi_ap", "links", "medium", "run", "traffic"})
     raw_nodes = _require(doc, "nodes", "scenario")
     if not isinstance(raw_nodes, list) or not raw_nodes:
         raise ValueError("scenario.nodes must be a non-empty list")
-
     nodes = [_parse_node(rn, f"nodes[{i}]", base_dir) for i, rn in enumerate(raw_nodes)]
     for kind, values in (("node id", [n.node_id for n in nodes]), ("mac", [n.mac for n in nodes])):
         dupes = {v for v in values if values.count(v) > 1}
         if dupes:
             raise ValueError(f"scenario.nodes: duplicate {kind} {sorted(dupes)[0]}")
     ap = _parse_ap(doc.get("wifi_ap"), nodes)
-
-    run = doc.get("run", {})
+    run = _section(doc.get("run", {}), "run", {"duration_us", "slice_us", "seed", "out_dir"})
     name = doc.get("name", "scenario")
+    seed = int(run.get("seed", 0))
+    ids = {n.node_id for n in nodes} | ({AP_NODE_ID} if ap else set())
     return ScenarioConfig(
         name=name, nodes=tuple(nodes),
-        medium=_parse_medium(doc.get("medium", {})),
-        duration_us=int(run.get("duration_us", 1_000_000)),
-        slice_us=int(run.get("slice_us", 1000)),
-        seed=int(run.get("seed", 0)),
+        medium=_parse_medium(doc.get("medium", {}), seed),
+        duration_us=_positive(run.get("duration_us", 1_000_000), "run.duration_us"),
+        slice_us=_positive(run.get("slice_us", 1000), "run.slice_us"),
+        seed=seed,
         out_dir=run.get("out_dir", os.path.join("out", name)),
-        port=int(run.get("port", 0)),
         traffic=tuple(_parse_traffic(doc.get("traffic", []),
                                      {n.node_id for n in nodes if n.firmware is None})),
         ap=ap,
-        links=tuple(_parse_links(doc.get("links", []),
-                                 {n.node_id for n in nodes} | ({ap.node_id} if ap else set()))),
+        links=tuple(_parse_links(doc.get("links", []), ids)),
     )
 
 
-def _parse_node(rn: dict, ctx: str, base_dir: str) -> NodeConfig:
+def _parse_node(rn: Any, ctx: str, base_dir: str) -> NodeConfig:
+    rn = _section(rn, ctx, {"id", "mac", "pos", "channel", "firmware", "wifi"})
     nid = int(_require(rn, "id", ctx))
     if nid < 1:
         raise ValueError(f"{ctx}: node ids start at 1 (0 is the access point)")
-    pos = rn.get("pos", [0.0, 0.0, 0.0])
-    if not isinstance(pos, (list, tuple)) or len(pos) < 2:
-        raise ValueError(f"{ctx}.pos must be [x, y] or [x, y, z]")
+    pos = rn.get("pos", [0.0, 0.0])
+    if not isinstance(pos, (list, tuple)) or len(pos) != 2:
+        raise ValueError(f"{ctx}.pos must be [x, y] in metres")
     return NodeConfig(node_id=nid, mac=normalize_mac(_require(rn, "mac", ctx)),
-                      x=float(pos[0]), y=float(pos[1]),
-                      z=float(pos[2]) if len(pos) > 2 else 0.0,
-                      channel=int(rn.get("channel", 1)),
+                      x=float(pos[0]), y=float(pos[1]), channel=int(rn.get("channel", 1)),
                       firmware=_parse_firmware(rn.get("firmware"), base_dir, ctx),
                       wifi=bool(rn.get("wifi", False)))
 
 
-def _parse_traffic(raw: Any, valid_ids: set) -> list:
-    if not raw:
-        return []
+def _parse_traffic(raw: Any, mock_ids: set) -> list:
     if not isinstance(raw, list):
         raise ValueError("scenario.traffic must be a list")
     out = []
     for i, t in enumerate(raw):
         ctx = f"traffic[{i}]"
+        t = _section(t, ctx, {"node", "at_us", "dst", "size_bytes", "count", "period_us"})
         nid = int(_require(t, "node", ctx))
-        if nid not in valid_ids:
+        if nid not in mock_ids:
             raise ValueError(f"{ctx}: node {nid} is not a declared mock node "
                              "(firmware nodes generate their own traffic)")
         dst = t.get("dst", "broadcast")
-        dst = "ff:ff:ff:ff:ff:ff" if dst in ("broadcast", "bcast") else normalize_mac(dst)
         out.append(TrafficConfig(
-            node_id=nid, at_us=int(_require(t, "at_us", ctx)), dst=dst,
+            node_id=nid, at_us=int(_require(t, "at_us", ctx)),
+            dst=BROADCAST_MAC if dst == "broadcast" else normalize_mac(dst),
             size_bytes=int(t.get("size_bytes", 16)),
-            count=int(t.get("count", 1)), period_us=int(t.get("period_us", 0))))
+            count=_positive(t.get("count", 1), f"{ctx}.count"),
+            period_us=int(t.get("period_us", 0))))
     return out
 
 
@@ -181,6 +163,7 @@ def _parse_links(raw: Any, valid_ids: set) -> list:
     out = []
     for i, rl in enumerate(raw):
         ctx = f"links[{i}]"
+        rl = _section(rl, ctx, {"a", "b", "rssi_dbm", "loss"})
         a, b = int(_require(rl, "a", ctx)), int(_require(rl, "b", ctx))
         for nid in (a, b):
             if nid not in valid_ids:
@@ -197,12 +180,13 @@ def _parse_links(raw: Any, valid_ids: set) -> list:
     return out
 
 
-def _parse_ap(raw: Optional[dict], nodes: list) -> Optional[AccessPoint]:
+def _parse_ap(raw: Any, nodes: list) -> Optional[AccessPoint]:
     wifi_nodes = [n for n in nodes if n.wifi]
     if raw is None:
         if wifi_nodes:
             raise ValueError("nodes with wifi: true need a wifi_ap section")
         return None
+    raw = _section(raw, "wifi_ap", {"pos", "channel", "mac", "ssid"})
     pos = _require(raw, "pos", "wifi_ap")
     ap = AccessPoint(mac=normalize_mac(raw.get("mac", "02:00:00:00:00:01")),
                      x=float(pos[0]), y=float(pos[1]), channel=int(raw.get("channel", 1)),
@@ -234,23 +218,27 @@ def _parse_firmware(raw: Optional[str], base_dir: str, ctx: str) -> Optional[str
     return path
 
 
-def _parse_medium(m: dict) -> MediumConfigSpec:
-    if not isinstance(m, dict):
-        raise ValueError("scenario.medium must be a mapping")
+def _parse_medium(raw: Any, seed: int) -> MediumConfig:
+    m = _section(raw, "medium", {"error_model", "packet_error_rate", "path_loss_exponent",
+                                 "tx_power_dbm", "noise_figure_db", "max_retries"})
+    defaults = MediumConfig()
     error_model = m.get("error_model", "snr_per")
-    if error_model not in ("constant", "snr_per"):
+    if error_model == "constant":
+        model = ConstantErrorModel(float(m.get("packet_error_rate", 0.0)))
+    elif error_model == "snr_per":
+        model = SnrPerErrorModel()
+    else:
         raise ValueError(f"medium.error_model must be constant|snr_per, got {error_model!r}")
-    return MediumConfigSpec(
-        error_model=error_model,
-        packet_error_rate=float(m.get("packet_error_rate", 0.0)),
-        path_loss_exponent=float(m.get("path_loss_exponent", 3.0)),
-        tx_power_dbm=float(m.get("tx_power_dbm", 20.0)),
-        noise_figure_db=float(m.get("noise_figure_db", 7.0)),
-        capture_threshold_db=float(m.get("capture_threshold_db", 4.0)),
-        max_retries=int(m.get("max_retries", 34)))
+    return MediumConfig(
+        propagation=LogDistance(
+            float(m.get("path_loss_exponent", defaults.propagation.exponent)),
+            float(m.get("tx_power_dbm", defaults.propagation.tx_power_dbm))),
+        error_model=model,
+        noise_figure_db=float(m.get("noise_figure_db", defaults.noise_figure_db)),
+        max_retries=int(m.get("max_retries", defaults.max_retries)),
+        seed=seed)
 
 
 def load_scenario(path: str) -> ScenarioConfig:
-    import yaml
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return parse_scenario(yaml.safe_load(f), os.path.dirname(os.path.abspath(path)))

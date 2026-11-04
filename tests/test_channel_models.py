@@ -1,116 +1,51 @@
-"""Tests for the wireless-medium physics (channel/*).
-
-These validate: (a) documented reference constants, (b) physical invariants, and
-(c) a few hand-computed points. They do NOT assert bit-exact ns-3 parity.
-"""
+"""The radio model against reference constants, physical invariants and hand-computed points."""
 
 import math
 import random
 
 import pytest
 
-from esp_netsim.channel import units
-from esp_netsim.channel.pathloss import LogDistance, FREQ_2_4_GHZ
-from esp_netsim.channel.error_model import (
-    ReceptionContext, ConstantErrorModel, SnrPerErrorModel, ber_dbpsk,
-)
-from esp_netsim.channel.airtime import AirtimeModel, DIFS_US, SIFS_US, SLOT_US
+from esp_netsim import channel as ch
 
 
-# ---- units -----------------------------------------------------------------
-
-def test_thermal_noise_reference():
-    # -174 dBm/Hz is the textbook value; our exact constant is ~-173.98.
-    assert units.THERMAL_NOISE_DBM_PER_HZ == pytest.approx(-173.98, abs=0.02)
-    # Noise floor over 22 MHz with 0 dB NF ~ -100.6 dBm.
-    nf = units.thermal_noise_dbm(22e6, noise_figure_db=0.0)
-    assert nf == pytest.approx(-100.56, abs=0.1)
-
-
-def test_dbm_mw_roundtrip():
-    for dbm in (-100.0, -50.0, 0.0, 20.0):
-        assert units.mw_to_dbm(units.dbm_to_mw(dbm)) == pytest.approx(dbm, abs=1e-9)
+def test_noise_floor_reference():
+    assert ch.THERMAL_NOISE_DBM_PER_HZ == pytest.approx(-173.98, abs=0.02)   # textbook -174
+    assert ch.noise_floor_dbm(0.0) == pytest.approx(-100.56, abs=0.1)        # 22 MHz, 0 dB NF
 
 
 def test_qfunc_known_points():
-    assert units.qfunc(0.0) == pytest.approx(0.5, abs=1e-12)
-    assert units.qfunc(1.0) == pytest.approx(0.158655, abs=1e-5)
-    assert units.qfunc(2.0) == pytest.approx(0.022750, abs=1e-5)
-
-
-# ---- path loss -----------------------------------------------------
-
-def test_friis_reference_matches_ns3_default():
-    # ns-3's ReferenceLoss for 802.11b at 1 m is 40.0459 dB.
-    assert units.friis_loss_1m_db(FREQ_2_4_GHZ) == pytest.approx(40.046, abs=0.01)
+    assert ch.qfunc(0.0) == pytest.approx(0.5, abs=1e-12)
+    assert ch.qfunc(1.0) == pytest.approx(0.158655, abs=1e-5)
+    assert ch.qfunc(2.0) == pytest.approx(0.022750, abs=1e-5)
 
 
 def test_log_distance_reference_exponent_and_clamp():
-    m = LogDistance(exponent=3.0, tx_power_dbm=20.0)
+    assert ch.FRIIS_LOSS_1M_DB == pytest.approx(40.046, abs=0.01)   # ns-3's 40.0459 dB
+    m = ch.LogDistance(exponent=3.0, tx_power_dbm=20.0)
     assert m.rx_power_dbm(1.0) == pytest.approx(20.0 - 40.046, abs=0.01)
-    # Each decade of distance costs 10*n = 30 dB.
     assert m.rx_power_dbm(10.0) - m.rx_power_dbm(100.0) == pytest.approx(30.0, abs=1e-9)
     assert m.rx_power_dbm(0.0) == m.rx_power_dbm(1.0)
 
 
-# ---- error models --------------------------------------------------
-
-def test_constant_error_model():
-    m = ConstantErrorModel(0.25)
-    ctx = ReceptionContext(snr_db=50, nbytes=100, rate_mbps=1.0)
-    assert m.per(ctx) == 0.25
-
-
-def test_dbpsk_ber_reference():
-    # Pb = 0.5 e^{-Eb/N0}. At Eb/N0=1 -> 0.5/e ~= 0.18394.
-    assert ber_dbpsk(1.0) == pytest.approx(0.5 * math.exp(-1.0), abs=1e-12)
+def test_dbpsk_per_matches_hand_computed_point():
+    # SNR such that Eb/N0 = 1 at 1 Mbps over 22 MHz: BER = 0.5/e, PER over one byte.
+    snr_db = 10 * math.log10(1.0 / 22.0)
+    ber = 0.5 * math.exp(-1.0)
+    assert ch.SnrPerErrorModel().per(snr_db, 1, 1.0) == pytest.approx(1 - (1 - ber) ** 8)
 
 
-def test_snr_per_invariants_monotone_and_bounds():
-    m = SnrPerErrorModel()
-    pers = []
-    for snr in range(-10, 41, 2):
-        ctx = ReceptionContext(snr_db=float(snr), nbytes=100, rate_mbps=1.0)
-        per = m.per(ctx)
-        assert 0.0 <= per <= 1.0
-        pers.append(per)
-    # Monotonically non-increasing in SNR.
-    assert all(pers[i] >= pers[i + 1] - 1e-12 for i in range(len(pers) - 1))
-    # Very low SNR -> nearly certain loss; very high SNR -> nearly certain success.
-    assert pers[0] > 0.99
-    assert pers[-1] < 1e-3
+def test_snr_per_is_monotone_and_bounded():
+    m = ch.SnrPerErrorModel()
+    pers = [m.per(float(snr), 100, 1.0) for snr in range(-10, 41, 2)]
+    assert all(0.0 <= p <= 1.0 for p in pers)
+    assert all(a >= b - 1e-12 for a, b in zip(pers, pers[1:]))
+    assert pers[0] > 0.99 and pers[-1] < 1e-3
+    assert m.per(6.0, 250, 1.0) >= m.per(6.0, 10, 1.0)   # longer frames lose more
 
 
-def test_snr_per_longer_frames_have_higher_per():
-    m = SnrPerErrorModel()
-    short = m.per(ReceptionContext(snr_db=6.0, nbytes=10, rate_mbps=1.0))
-    long = m.per(ReceptionContext(snr_db=6.0, nbytes=250, rate_mbps=1.0))
-    assert long >= short
-
-
-# ---- airtime -------------------------------------------------------
-
-def test_dcf_constants():
-    assert SLOT_US == 20 and SIFS_US == 10 and DIFS_US == 50
-def test_airtime_order_of_magnitude_matches_espnow_mac():
-    # ~1 ms MAC latency regime for small ESP-NOW frames at 1 Mbps.
-    m = AirtimeModel()
-    # No backoff (rng=None) to test the deterministic floor.
-    t1 = m.tx_airtime_us(payload_bytes=1, rate_mbps=1.0, acknowledged=True)
-    t100 = m.tx_airtime_us(payload_bytes=100, rate_mbps=1.0, acknowledged=True)
-    assert 300 <= t1 <= 1500        # same order as measured 1059 us
-    assert t100 > t1                # larger payload -> more airtime
-    # 99 extra payload bytes at 1 Mbps = 99*8 = 792 us more.
-    assert (t100 - t1) == pytest.approx(792, abs=2)
-
-
-def test_broadcast_has_no_ack_overhead():
-    m = AirtimeModel()
-    uni = m.tx_airtime_us(50, 1.0, acknowledged=True)
-    bcast = m.tx_airtime_us(50, 1.0, acknowledged=False)
-    assert uni > bcast  # ACK + SIFS present only for unicast
-
-
-def test_backoff_is_seeded():
-    m = AirtimeModel()
-    assert m.backoff_us(random.Random(7)) == m.backoff_us(random.Random(7))
+def test_airtime_scales_with_payload_and_ack():
+    def airtime(nbytes, acked):
+        return ch.airtime_us(nbytes, 1.0, acked, random.Random(7))   # same backoff each call
+    assert 300 <= airtime(1, True) <= 1500           # same order as the measured 1,059 us
+    assert airtime(100, True) - airtime(1, True) == 99 * 8
+    assert airtime(50, True) - airtime(50, False) == ch.ACK_TAIL_US

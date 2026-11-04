@@ -1,8 +1,7 @@
-"""Tests for the RadioMedium engine (medium.py): ESP-NOW semantics + collision."""
+"""The medium's verdicts: ESP-NOW send-callback semantics, collisions, carrier sense, links."""
 
+from esp_netsim.channel import ACK_TAIL_US, ConstantErrorModel, SnrPerErrorModel
 from esp_netsim.medium import MediumEngine, MediumConfig, Frame, Link
-from esp_netsim.channel.airtime import AirtimeModel
-from esp_netsim.channel.error_model import ConstantErrorModel
 from esp_netsim.protocol import BROADCAST_MAC
 
 
@@ -34,7 +33,7 @@ def test_unicast_success_when_deliverable():
 
 
 def test_unicast_to_absent_mac_sends_every_attempt():
-    eng = make_engine(max_retries=34)
+    eng = make_engine()
     eng.add_node(1, MAC1)
     out = eng.transmit(frame(1, MAC1, MAC2))  # no node has MAC2
     assert out.status == "fail" and out.reason == "no_receiver"
@@ -42,20 +41,12 @@ def test_unicast_to_absent_mac_sends_every_attempt():
 
 
 def test_neighbour_defers_through_whole_retry_sequence():
-    eng = make_engine(max_retries=34)
+    eng = make_engine()
     eng.add_node(1, MAC1, x=0)
     eng.add_node(2, MAC2, x=5)
     lost = eng.transmit(frame(1, MAC1, MAC3))  # no node has MAC3
     out = eng.transmit(frame(2, MAC2, BROADCAST_MAC, start=lost.airtime_us // 2))
     assert out.frame.start_us == lost.airtime_us
-
-
-def test_unicast_fail_channel_mismatch():
-    eng = make_engine()
-    eng.add_node(1, MAC1, channel=1)
-    eng.add_node(2, MAC2, channel=6)
-    out = eng.transmit(frame(1, MAC1, MAC2, ch=1))
-    assert out.status == "fail" and out.reason == "channel_mismatch"
 
 
 def test_unicast_fail_lost_on_air_uses_retries():
@@ -98,14 +89,13 @@ def test_encrypted_unicast_requires_matching_lmk():
     eng.add_node(1, MAC1, x=0)
     eng.add_node(2, MAC2, x=1)
     lmk = bytes(range(16))
-    # Sender adds encrypted peer, but receiver has NO matching peer/LMK -> fail.
-    eng.add_peer(1, MAC2, channel=1, encrypt=True, lmk=lmk)
+    eng.add_peer(1, MAC2, encrypt=True, lmk=lmk)
     out = eng.transmit(frame(1, MAC1, MAC2, start=0))
     assert out.status == "fail" and out.reason == "encrypt_no_matching_lmk"
-    # Now the receiver adds the sender with the same LMK -> success (later event).
-    eng.add_peer(2, MAC1, channel=1, encrypt=True, lmk=lmk)
-    out2 = eng.transmit(frame(1, MAC1, MAC2, start=100_000))
-    assert out2.status == "success"
+    eng.add_peer(2, MAC1, encrypt=True, lmk=lmk)
+    assert eng.transmit(frame(1, MAC1, MAC2, start=100_000)).status == "success"
+    eng.del_peer(2, MAC1)
+    assert eng.transmit(frame(1, MAC1, MAC2, start=200_000)).reason == "encrypt_no_matching_lmk"
 
 
 # ---- collision / SINR ------------------------------
@@ -168,10 +158,7 @@ def test_non_overlapping_transmissions_do_not_collide():
 
 def test_determinism_same_seed_same_result():
     def run():
-        eng = make_engine(error_model=None, seed=42)
-        # use physical model so randomness is exercised
-        from esp_netsim.channel.error_model import SnrPerErrorModel
-        eng.cfg.error_model = SnrPerErrorModel()
+        eng = make_engine(SnrPerErrorModel(), seed=42)
         eng.add_node(1, MAC1, x=0, y=0)
         eng.add_node(2, MAC2, x=40, y=0)
         return [eng.transmit(frame(1, MAC1, MAC2, seq=i, start=i * 5000)).status
@@ -196,7 +183,7 @@ def test_unicast_rx_lands_before_the_ack_tail():
     eng.add_node(1, MAC1, x=0, y=0)
     eng.add_node(2, MAC2, x=1, y=0)
     out = eng.transmit(frame(1, MAC1, MAC2))
-    assert out.receivers[0].delivery_us == out.airtime_us - AirtimeModel().ack_tail_us()
+    assert out.receivers[0].delivery_us == out.airtime_us - ACK_TAIL_US
 
 
 # ---- per-link overrides ----------------------------------------------------

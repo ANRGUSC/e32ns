@@ -6,9 +6,10 @@ import argparse
 import asyncio
 import sys
 import webbrowser
+from importlib.metadata import version
 from pathlib import Path
 
-from . import __version__, editor
+from . import editor
 from .config.schema import load_scenario
 from .orchestrator.runner import run_scenario
 
@@ -20,7 +21,7 @@ def _cmd_validate(args) -> int:
         print(f"INVALID: {exc}", file=sys.stderr)
         return 2
     print(f"OK: scenario '{sc.name}' — {len(sc.nodes)} nodes, "
-          f"error_model={sc.medium.error_model}, slice={sc.slice_us}us, "
+          f"error_model={type(sc.medium.error_model).__name__}, slice={sc.slice_us}us, "
           f"duration={sc.duration_us}us, seed={sc.seed}, "
           f"traffic_events={len(sc.traffic)}")
     return 0
@@ -33,7 +34,7 @@ def _cmd_run(args) -> int:
           f"{sc.duration_us} us @ {sc.slice_us} us slices (seed {sc.seed})...")
     result = asyncio.run(run_scenario(sc))
     s = result.stats
-    print(f"slices run     : {s.slices} (effective quantum {sc.duration_us // max(s.slices, 1)} us "
+    print(f"slices run     : {s.slices} (effective quantum {sc.duration_us // s.slices} us "
           "of virtual time)")
     print(f"transmissions  : {s.tx_total}  (success {s.tx_success}, fail {s.tx_fail})")
     print(f"receptions     : delivered {s.rx_delivered}, dropped {s.rx_dropped}")
@@ -62,7 +63,7 @@ def _cmd_edit(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="esp-netsim",
                                 description="Cooja-like network emulator for ESP32-S3.")
-    p.add_argument("--version", action="version", version=f"esp-netsim {__version__}")
+    p.add_argument("--version", action="version", version=f"esp-netsim {version('esp-netsim')}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pr = sub.add_parser("run", help="run a scenario end to end")
@@ -84,7 +85,3 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     return args.func(args)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

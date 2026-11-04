@@ -49,7 +49,7 @@ void app_main(void) {
     add_peer(ABSENT);
 
     for (int r = 0; r < ROUNDS; r++) {
-        for (int i = 0; i < 3; i++) {
+        for (size_t i = 0; i < sizeof LENS / sizeof LENS[0]; i++) {
             probe(BCAST, LENS[i]);
             probe(ABSENT, LENS[i]);
             vTaskDelay(pdMS_TO_TICKS(20));

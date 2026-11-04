@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
 from ..config.schema import AccessPoint, NodeConfig
-from ..medium import Frame, TxOutcome
+from ..medium import AP_NODE_ID, Frame, TxOutcome
+from ..protocol import STATUS_SUCCESS, mac_bytes
 from .simulation import Simulation
 
 WIFI_RATE_MBPS = 11.0
@@ -51,12 +52,8 @@ def parse_connect_request(eth: bytes) -> str:
 def connect_reply(sta_mac: str, ap_mac: str, reason: int, channel: int, rssi_dbm: float) -> bytes:
     """The bridge's answer to a connect request; the shim turns it into a Wi-Fi event."""
     rssi = max(-128, min(127, round(rssi_dbm)))
-    return (_mac(sta_mac) + _mac(ap_mac) + ETHERTYPE_CTRL
+    return (mac_bytes(sta_mac) + mac_bytes(ap_mac) + ETHERTYPE_CTRL
             + bytes((OP_CONNECT_REPLY, reason, channel)) + rssi.to_bytes(1, "big", signed=True))
-
-
-def _mac(mac: str) -> bytes:
-    return bytes.fromhex(mac.replace(":", ""))
 
 
 @dataclass(frozen=True)
@@ -90,7 +87,7 @@ class StationLink:
 def station_link(node: NodeConfig, ap: AccessPoint) -> StationLink:
     """Both directions of the radio link between a station and the AP."""
     return StationLink(node, ap, Hop(node.node_id, node.mac, ap.mac, ap.channel),
-                       Hop(ap.node_id, ap.mac, node.mac, ap.channel))
+                       Hop(AP_NODE_ID, ap.mac, node.mac, ap.channel))
 
 
 def _mgmt_body(subtype: int, ap: AccessPoint, aid: int) -> bytes:
@@ -117,10 +114,10 @@ async def associate(sim: Simulation, link: StationLink, ssid: str) -> tuple[int,
 
     for req, resp, failure in STEPS:
         out = await send(link.up, req)
-        if out.status != "success" or (req == PROBE_REQ and ssid != link.ap.ssid):
+        if out.status != STATUS_SUCCESS or (req == PROBE_REQ and ssid != link.ap.ssid):
             return failure, rssi
         out = await send(link.down, resp)
-        if out.status != "success":
+        if out.status != STATUS_SUCCESS:
             return failure, rssi
         rssi = out.receivers[0].rssi_dbm
     return ASSOCIATED, rssi
@@ -152,13 +149,12 @@ async def _pump(sim: Simulation, source: tuple, sink: tuple, hop: Hop, on_connec
         (n,) = LENGTH.unpack(await reader.readexactly(LENGTH.size))
         eth = await reader.readexactly(n)
 
-        async def forward(outcome: TxOutcome, eth=eth) -> None:
-            if any(r.delivered for r in outcome.receivers):
-                await _write(writer, eth)
-
         if on_connect and eth[12:14] == ETHERTYPE_CTRL:
             await on_connect(eth)
-        elif is_medium_control(eth, sim.server.actual_port):
+        elif is_medium_control(eth, sim.server.port):
             await _write(writer, eth)
         else:
+            async def forward(outcome: TxOutcome, eth=eth) -> None:
+                if any(r.delivered for r in outcome.receivers):
+                    await _write(writer, eth)
             sim.offer(hop.frame(sim.now_us, eth), forward)

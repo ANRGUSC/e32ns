@@ -1,31 +1,19 @@
-"""End-to-end tests over real TCP loopback: medium + server + barrier + mock nodes.
-
-These exercise the full vertical slice with no QEMU: protocol framing,
-transport, the SliceTime barrier, and ESP-NOW send/recv semantics.
-"""
+"""End to end over loopback TCP with mock nodes: framing, transport, barrier, ESP-NOW semantics."""
 
 import asyncio
 import json
 
-import pytest
-
 from esp_netsim.medium import MediumEngine, MediumConfig
-from esp_netsim.channel.error_model import ConstantErrorModel
+from esp_netsim.channel import ConstantErrorModel
 from esp_netsim.orchestrator.simulation import Simulation
 from esp_netsim.nodes.mock_node import MockNode
 from esp_netsim.protocol import BROADCAST_MAC
 from esp_netsim.config.schema import parse_scenario
 from esp_netsim.orchestrator.runner import run_scenario
 
-pytestmark = pytest.mark.asyncio
-
 MAC1 = "aa:bb:cc:00:00:01"
 MAC2 = "aa:bb:cc:00:00:02"
 MAC3 = "aa:bb:cc:00:00:03"
-
-
-async def _drain(seconds: float = 0.1):
-    await asyncio.sleep(seconds)
 
 
 async def test_two_node_broadcast_end_to_end():
@@ -46,11 +34,9 @@ async def test_two_node_broadcast_end_to_end():
     await sim.wait_for_nodes(3)
 
     await sim.run(duration_us=3000)
-    await _drain()
+    await asyncio.sleep(0.1)
 
-    # Sender got a success callback (broadcast is unacknowledged-success).
     assert n1.send_status.get(1) == "success"
-    # Both other nodes received the broadcast.
     assert any(r.data == b"beacon" for r in n2.received)
     assert any(r.data == b"beacon" for r in n3.received)
     assert sim.stats.tx_success == 1
@@ -61,7 +47,6 @@ async def test_two_node_broadcast_end_to_end():
 
 
 async def test_unicast_controlled_loss_end_to_end():
-    # Force total loss -> unicast send callback must be "fail" and no RX arrives.
     engine = MediumEngine(MediumConfig(error_model=ConstantErrorModel(1.0), max_retries=2))
     engine.add_node(1, MAC1, x=0, y=0)
     engine.add_node(2, MAC2, x=5, y=0)
@@ -77,7 +62,7 @@ async def test_unicast_controlled_loss_end_to_end():
     await sim.wait_for_nodes(2)
 
     await sim.run(duration_us=5000)   # 3 lost attempts: the send callback lands ~2.9 ms in
-    await _drain()
+    await asyncio.sleep(0.1)
 
     assert n1.send_status.get(7) == "fail"
     assert n2.received == []
@@ -103,13 +88,11 @@ async def test_unicast_success_end_to_end():
         await n.connect()
     await sim.wait_for_nodes(2)
     await sim.run(duration_us=2000)
-    await _drain()
+    await asyncio.sleep(0.1)
 
     assert n1.send_status.get(1) == "success"
     assert any(r.data == b"ping" for r in n2.received)
-    # RX carried an RSSI value (radiotap-style metadata).
-    got = [r for r in n2.received if r.data == b"ping"][0]
-    assert got.rssi_dbm < 0  # dBm receive power
+    assert [r.rssi_dbm < 0 for r in n2.received] == [True]
 
     await sim.stop()
     for n in (n1, n2):
