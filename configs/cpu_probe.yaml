@@ -1,0 +1,10 @@
+# Barrier dilation (RESEARCH_LOG V-020): one node runs firmware E and logs how many fixed work
+# loops it completes per 100 ms of its own clock. Change slice_us and compare the loop counts.
+name: cpu_probe
+
+nodes:
+  - { id: 1, mac: "aa:bb:cc:00:00:01", pos: [0, 0], firmware: ../firmware/examples/cpu_probe/build }
+
+run:
+  duration_us: 7000000
+  slice_us: 250

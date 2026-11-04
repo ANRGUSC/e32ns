@@ -26,7 +26,8 @@ its Appendix C is the current status.
 
 All of the above run with real firmware. Two physical boards checked the retry count,
 send-callback timing and RTT against the emulator: delivery, loss and ordering are exact, and
-timing is quantized to a barrier step of about 1 ms.
+timing is quantized to a barrier step of about 1 ms, during which guest code runs about 1.3x
+slow (RESEARCH_LOG V-020); RTT reads 0.6–1.3 ms high.
 
 ## Run it
 
@@ -134,7 +135,8 @@ src/esp_netsim/
   config/ trace/ nodes/ transport/ cli.py
 firmware/components/espnet_shim/   the ESP-IDF shim (C)
 firmware/examples/                 firmware A (espnow_ping), B (espnow_pong), C (wifi_http),
-                                   D (espnow_txprobe, send-callback timing for board comparison)
+                                   D (espnow_txprobe, send-callback timing for board comparison),
+                                   E (cpu_probe, guest CPU time lost to the barrier, V-020)
 configs/                           scenarios
 tests/                             pytest suite
 docs/                              raw evidence logs from the feasibility spikes

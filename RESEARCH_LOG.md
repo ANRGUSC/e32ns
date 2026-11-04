@@ -967,6 +967,54 @@ loss and retries.
 
 ---
 
+## V-020 — Why RTT rises as slices shrink: each cont/stop cycle costs the guest ~225 µs
+
+**Question.** D-035 found that smaller slices shrink the quantum but raise RTT (3.73 ms at
+`slice_us: 250`, 4.80 at 20). Where does the time go?
+
+**Decomposition.** Two nodes 0.3 m apart (firmware A and B, 15 s per setting, ~100 round trips).
+Medians from `results.json`, which stamps each frame in virtual time, and the ping's own RTT log:
+
+| `slice_us` | quantum | ping airtime | pong turnaround | reply airtime | RTT (guest) | inside the ping node |
+|---|---|---|---|---|---|---|
+| 20 | 0.62 ms | 730 | 3,329 | 710 | 5,346 | 582 |
+| 100 | 0.74 ms | 730 | 2,670 | 710 | 4,724 | 568 |
+| 250 | 1.01 ms | 730 | 2,494 | 710 | 4,432 | 523 |
+| 500 | 1.41 ms | 730 | 3,036 | 710 | 5,345 | 849 |
+| 1000 | 1.88 ms | 730 | 3,034 | 710 | 5,148 | 690 |
+| 2000 | 3.01 ms | 730 | 2,338 | 710 | 5,712 | 1,919 |
+
+(µs unless marked.) The medium's part is constant. Below 250 µs the growth is all in the pong's
+turnaround, from the delivery the medium computed to the reply reaching it: guest work (lwIP,
+the receive callback, the reply task, the send). Above 250 µs, waiting for slice boundaries
+dominates. RTT is U-shaped with its minimum at the default; these medians read ~0.7 ms higher
+than D-035's single run at 250 µs, so run-to-run spread is of that order.
+
+**The guest loses CPU time per cycle.** Firmware E (`cpu_probe`) counts fixed work loops per
+100 ms of its own clock, one node alone (`configs/cpu_probe.yaml`):
+
+| `slice_us` | quantum | loops per 100 ms | dilation, fitted |
+|---|---|---|---|
+| 20 | 0.63 ms | 13,347 | ×1.56 |
+| 100 | 0.64 ms | 15,046 | ×1.54 |
+| 250 | 0.89 ms | 17,220 | ×1.34 |
+| 1000 | 1.81 ms | 19,050 | ×1.14 |
+| 10000 | 11.1 ms | 21,770 | ×1.02 |
+
+Fitting throughput = F·(1 − D/Q) gives D = 225 µs per `cont`/`stop` cycle (F = 22,195): every
+cycle the guest clock runs about 0.22 ms in which no guest instruction executes, the vCPU waking
+after `cont` and winding down at `stop`. At the default slice, guest code takes 1.34× as long in
+guest time as it would free-running, which is the slice-dependent part of the RTT error. More,
+shorter slices pay D more often; fewer, longer ones quantize more. 250 µs stays.
+
+**`-icount` does not rescue it.** With `-icount shift=auto` the same probe completes 91 loops per
+100 ms of guest time, about 235× fewer; with `shift=3` it did not finish a round in 25 s. As the
+brief warned (§1, §4), instruction counting is impractical on this fork. Removing D needs the
+barrier inside QEMU (a device that blocks the vCPU at a virtual-time boundary, as SimBricks does)
+rather than QMP `cont`/`stop`; that is a QEMU patch.
+
+---
+
 # PART II — Current-state reference
 
 ## Appendix A — Architecture
@@ -1067,15 +1115,15 @@ Hardware: send-callback timing and retry count on two boards (V-014, V-015); A/B
 on two boards together (V-016). PDR vs distance is out of scope for this phase (decided
 2026-11-02).
 
-Known limits: timing is quantized to an effective quantum of 0.85–1.3 ms of virtual time; RTT
-reads ~0.6 ms (2 nodes) to ~1 ms (6 nodes) high against the boards (D-035); delivery, loss and
-ordering are exact. Guest clocks drift from host time (D-029). Association is open-system only, with
+Known limits: timing is quantized to an effective quantum of 0.85–1.3 ms of virtual time, and
+guest code runs ~1.3× slow in guest time at that quantum (V-020); RTT reads ~0.6–1.3 ms high
+against the boards (D-035, V-020); delivery, loss and ordering are exact. Guest clocks drift from host time (D-029). Association is open-system only, with
 no WPA2 handshake, beacons or scan time (D-039); no station-to-station traffic through the AP
 (D-032). Firmware runs are not bit-reproducible.
 
 **Open, in order.**
-1. Find why RTT rises as slices shrink (D-035): timestamp the shim's TX and RX path in the guest.
-   Then `-icount` or a run-to-next-event barrier for the ~0.5 ms QMP floor.
+1. Move the barrier into QEMU to remove the ~225 µs each `cont`/`stop` costs the guest (V-020);
+   `-icount` is impractical on this fork.
 2. Station-to-station traffic through one shared AP (one slirp per station today, D-032).
 3. WPA2 four-way handshake and beacons (D-039).
 4. PDR vs distance on boards moved apart, to fit `path_loss_exponent`, `tx_power_dbm` and
