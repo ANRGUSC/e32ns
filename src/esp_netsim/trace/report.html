@@ -57,8 +57,9 @@ pre { margin: 0; height: 460px; overflow: auto; background: var(--code); padding
         <option value="0.05">0.05x</option><option value="0.2" selected>0.2x</option><option value="1">1x</option>
       </select>
     </div>
-    <div class="legend">Line colour is the link's delivery ratio over the whole run.
-      A flash is one frame on the air: <b class="ok">delivered</b> or <b class="lost">lost</b>.</div>
+    <div class="legend">Line colour is the link's delivery ratio so far. A flash is one frame on the
+      air: <b class="ok">delivered</b> or <b class="lost">lost</b>. Broadcast receivers out of range are
+      left off; the totals above count them.</div>
     <ul id="packets" aria-label="Packets up to the current time"></ul>
   </section>
   <section>
@@ -68,28 +69,23 @@ pre { margin: 0; height: 460px; overflow: auto; background: var(--code); padding
   </section>
 </main>
 <script>
-const RUN = /*DATA*/null;
+const DATA = /*DATA*/null;   // a finished run, or "live": poll run.json while the run goes on
 const SVG = "http://www.w3.org/2000/svg";
-const FLASH_US = 40000;
-const byId = Object.fromEntries(RUN.nodes.map(n => [n.id, n]));
-const events = RUN.events.filter(e => e.rx !== null).sort((a, b) => a.t_us - b.t_us);
+const FLASH_US = 40000, POLL_MS = 1000, pad = 40, W = 640, BROADCAST = "ff:ff:ff:ff:ff:ff";
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const map = document.getElementById("map"), scrub = document.getElementById("scrub");
+const clock = document.getElementById("clock"), packets = document.getElementById("packets");
+const consoleEl = document.getElementById("console"), tabs = document.getElementById("tabs");
 
-document.getElementById("title").textContent = RUN.name;
-document.getElementById("subtitle").textContent =
-  `${RUN.nodes.length} nodes, ${(RUN.duration_us / 1e6).toFixed(1)} s of virtual time, ` +
-  `${RUN.stats.tx_total} transmissions, ${RUN.stats.rx_delivered} receptions delivered, ` +
-  `${RUN.stats.rx_dropped} lost`;
+let run, byId, events, end, px, flashLayer, logs = {}, shown = null;
+let now = 0, playing = false, last = 0;
 
-const map = document.getElementById("map");
-const xs = RUN.nodes.map(n => n.pos[0]), ys = RUN.nodes.map(n => n.pos[1]);
-const pad = 40, W = 640;
-const minX = Math.min(...xs), minY = Math.min(...ys);
-const spanX = Math.max(...xs) - minX || 1, spanY = Math.max(...ys) - minY || 1;
-const k = Math.min((W - 2 * pad) / spanX, 360 / spanY);
-const H = Math.max(220, spanY * k + 2 * pad);
-map.setAttribute("viewBox", `0 0 ${W} ${H}`);
-const px = n => [pad + (n.pos[0] - minX) * k + (W - 2 * pad - spanX * k) / 2, pad + (n.pos[1] - minY) * k];
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(SVG, tag);
+  for (const [a, v] of Object.entries(attrs)) e.setAttribute(a, v);
+  parent.appendChild(e);
+  return e;
+}
 
 // Links bow sideways by their length so links along one line of nodes do not hide each other.
 // Callers pass the lower id first, so a link and its flashes bow the same way.
@@ -99,65 +95,81 @@ function arc(a, b) {
   return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
 }
 
-function el(tag, attrs, parent) {
-  const e = document.createElementNS(SVG, tag);
-  for (const [a, v] of Object.entries(attrs)) e.setAttribute(a, v);
-  parent.appendChild(e);
-  return e;
+function load(next) {
+  run = next;
+  end = run.now_us ?? run.duration_us;
+  byId = Object.fromEntries(run.nodes.map(n => [n.id, n]));
+  // A broadcast's verdict for a bystander too far to hear it is not a link; leave it off the map.
+  events = run.events.filter(e => e.rx !== null && !(e.dst === BROADCAST && e.reason === "below_sensitivity"))
+    .sort((a, b) => a.t_us - b.t_us);
+  document.getElementById("title").textContent = run.name + (run.now_us === undefined ? "" :
+    run.done ? " (finished)" : " (live)");
+  document.getElementById("subtitle").textContent =
+    `${run.nodes.length} nodes, ${(end / 1e6).toFixed(1)} of ${(run.duration_us / 1e6).toFixed(1)} s of virtual ` +
+    `time, ${run.stats.tx_total} transmissions, ${run.stats.rx_delivered} receptions delivered, ` +
+    `${run.stats.rx_dropped} lost`;
+  scrub.max = end;
+  drawMap();
+  logs = {};
+  for (const [id, text] of Object.entries(run.logs)) {
+    logs[id] = text.replace(/\r/g, "").split("\n").map(line => {
+      const m = line.match(/^[IWED] \((\d+)\)/);
+      return { ms: m ? Number(m[1]) : 0, line };
+    });
+  }
+  if (tabs.children.length !== Object.keys(logs).length) {
+    tabs.replaceChildren(...Object.keys(logs).map(id => {
+      const b = document.createElement("button");
+      b.textContent = `node ${id}`;
+      b.setAttribute("role", "tab");
+      b.onclick = () => { shown = id; render(); };
+      return b;
+    }));
+    shown ??= Object.keys(logs)[0] ?? null;
+  }
 }
 
-const links = {};
-for (const e of events) {
-  const [a, b] = [Math.min(e.src, e.rx), Math.max(e.src, e.rx)];
-  const l = links[`${a}-${b}`] ??= { a, b, sent: 0, ok: 0 };
-  l.sent++;
-  if (e.delivered) l.ok++;
-}
-const linkLayer = el("g", {}, map), flashLayer = el("g", {}, map), nodeLayer = el("g", {}, map);
-for (const l of Object.values(links)) {
-  const ratio = l.ok / l.sent;
-  const line = el("path", { d: arc(byId[l.a], byId[l.b]), fill: "none",
-    "stroke-width": 1 + Math.log2(l.sent),
-    stroke: ratio > 0.9 ? css("--ok") : ratio > 0 ? css("--ap") : css("--lost"), "stroke-opacity": 0.35 }, linkLayer);
-  el("title", {}, line).textContent = `${l.a} - ${l.b}: ${l.ok}/${l.sent} delivered`;
-}
-for (const n of RUN.nodes) {
-  const [x, y] = px(n);
-  const g = el("g", {}, nodeLayer);
-  const isAp = n.id === 0;
-  if (isAp) el("rect", { x: x - 10, y: y - 10, width: 20, height: 20, fill: css("--ap") }, g);
-  else el("circle", { cx: x, cy: y, r: 11, fill: css("--node") }, g);
-  el("text", { x, y: y + 4, "text-anchor": "middle", "font-size": 11, fill: css("--panel") }, g)
-    .textContent = isAp ? "AP" : n.id;
-  el("text", { x, y: isAp ? y - 16 : y + 26, "text-anchor": "middle", "font-size": 10, fill: css("--muted") }, g)
-    .textContent = isAp ? `access point, ch ${n.channel}` : n.firmware;
-  el("title", {}, g).textContent = `${isAp ? "access point" : "node " + n.id} ${n.mac} (${n.pos.join(", ")} m)`;
-}
+function drawMap() {
+  const xs = run.nodes.map(n => n.pos[0]), ys = run.nodes.map(n => n.pos[1]);
+  const minX = Math.min(...xs), minY = Math.min(...ys);
+  const spanX = Math.max(...xs) - minX || 1, spanY = Math.max(...ys) - minY || 1;
+  const k = Math.min((W - 2 * pad) / spanX, 360 / spanY);
+  map.setAttribute("viewBox", `0 0 ${W} ${Math.max(220, spanY * k + 2 * pad)}`);
+  px = n => [pad + (n.pos[0] - minX) * k + (W - 2 * pad - spanX * k) / 2, pad + (n.pos[1] - minY) * k];
 
-const scrub = document.getElementById("scrub"), clock = document.getElementById("clock");
-const packets = document.getElementById("packets"), consoleEl = document.getElementById("console");
-scrub.max = RUN.duration_us;
-let now = 0, playing = false, last = 0;
-
-const logs = {};
-for (const [id, text] of Object.entries(RUN.logs)) {
-  logs[id] = text.replace(/\r/g, "").split("\n").map(line => {
-    const m = line.match(/^[IWED] \((\d+)\)/);
-    return { ms: m ? Number(m[1]) : 0, line };
-  });
+  const links = {};
+  for (const e of events) {
+    const [a, b] = [Math.min(e.src, e.rx), Math.max(e.src, e.rx)];
+    const l = links[`${a}-${b}`] ??= { a, b, sent: 0, ok: 0 };
+    l.sent++;
+    if (e.delivered) l.ok++;
+  }
+  map.replaceChildren();
+  const linkLayer = el("g", {}, map), nodeLayer = el("g", {}, map);
+  flashLayer = el("g", {}, map);
+  for (const l of Object.values(links)) {
+    const ratio = l.ok / l.sent;
+    const line = el("path", { d: arc(byId[l.a], byId[l.b]), fill: "none",
+      "stroke-width": 1 + Math.log2(l.sent),
+      stroke: ratio > 0.9 ? css("--ok") : ratio > 0 ? css("--ap") : css("--lost"), "stroke-opacity": 0.35 }, linkLayer);
+    el("title", {}, line).textContent = `${l.a} - ${l.b}: ${l.ok}/${l.sent} delivered`;
+  }
+  for (const n of run.nodes) {
+    const [x, y] = px(n);
+    const g = el("g", {}, nodeLayer);
+    const isAp = n.id === 0;
+    if (isAp) el("rect", { x: x - 10, y: y - 10, width: 20, height: 20, fill: css("--ap") }, g);
+    else el("circle", { cx: x, cy: y, r: 11, fill: css("--node") }, g);
+    el("text", { x, y: y + 4, "text-anchor": "middle", "font-size": 11, fill: css("--panel") }, g)
+      .textContent = isAp ? "AP" : n.id;
+    el("text", { x, y: isAp ? y - 16 : y + 26, "text-anchor": "middle", "font-size": 10, fill: css("--muted") }, g)
+      .textContent = isAp ? `access point, ch ${n.channel}` : n.firmware;
+    el("title", {}, g).textContent = `${isAp ? "access point" : "node " + n.id} ${n.mac} (${n.pos.join(", ")} m)`;
+  }
 }
-const tabs = document.getElementById("tabs");
-for (const id of Object.keys(logs)) {
-  const b = document.createElement("button");
-  b.textContent = `node ${id}`;
-  b.setAttribute("role", "tab");
-  b.onclick = () => { shown = id; render(); };
-  tabs.appendChild(b);
-}
-let shown = Object.keys(logs)[0] ?? null;
 
 function describe(e) {
-  const kind = e.wifi ? "Wi-Fi" : "ESP-NOW";
+  const kind = e.mgmt !== null && e.mgmt !== undefined ? "Wi-Fi mgmt" : e.wifi ? "Wi-Fi" : "ESP-NOW";
   const to = e.rx === 0 ? "AP" : e.rx, from = e.src === 0 ? "AP" : e.src;
   const verdict = e.delivered ? `delivered, ${e.rssi_dbm} dBm` : `lost (${e.reason})`;
   const tries = e.attempts > 1 ? `, ${e.attempts} attempts` : "";
@@ -192,21 +204,49 @@ function render() {
 
 function tick(ts) {
   if (!playing) return;
-  now = Math.min(RUN.duration_us, now + (ts - last) * 1000 * Number(document.getElementById("speed").value));
+  now = Math.min(end, now + (ts - last) * 1000 * Number(document.getElementById("speed").value));
   last = ts;
   render();
-  if (now >= RUN.duration_us) { playing = false; document.getElementById("play").textContent = "Play"; return; }
+  if (now >= end) { playing = false; document.getElementById("play").textContent = "Play"; return; }
   requestAnimationFrame(tick);
 }
 document.getElementById("play").onclick = ev => {
   playing = !playing;
   ev.target.textContent = playing ? "Pause" : "Play";
-  if (now >= RUN.duration_us) now = 0;
+  if (now >= end) now = 0;
   last = performance.now();
   if (playing) requestAnimationFrame(tick);
 };
 scrub.oninput = () => { now = Number(scrub.value); render(); };
-render();
+
+// Live: fetch only what is new, and follow the newest virtual time unless the viewer scrubbed
+// back or is playing.
+async function poll() {
+  try {
+    const have = run ? `?events=${run.events.length}&logs=` +
+      Object.entries(run.logs).map(([id, text]) => `${id}:${text.length}`).join(",") : "";
+    const r = await fetch("run.json" + have, { cache: "no-store" });
+    if (r.ok) {
+      const following = run === undefined || (!playing && now >= end);
+      const fresh = await r.json();
+      if (run) {
+        fresh.events = run.events.concat(fresh.events);
+        for (const [id, text] of Object.entries(fresh.logs)) fresh.logs[id] = (run.logs[id] ?? "") + text;
+      }
+      load(fresh);
+      if (following) now = end;
+      render();
+      if (run.done) return;
+    }
+  } catch (err) {
+    document.getElementById("title").textContent = `${run ? run.name : "esp-netsim"} (view closed)`;
+    return;
+  }
+  setTimeout(poll, POLL_MS);
+}
+
+if (DATA === "live") poll();
+else { load(DATA); render(); }
 </script>
 </body>
 </html>

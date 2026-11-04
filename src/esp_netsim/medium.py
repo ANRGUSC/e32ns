@@ -198,7 +198,9 @@ class MediumEngine:
         interf_dbm = [self._rx_power(self._nodes[g.src_node], receiver) for g in interferers]
         sinr = self._sinr_db(wanted_dbm, interf_dbm)
         if sinr < self.cfg.capture_threshold_db:
-            reason = "collision" if interf_dbm else "below_sensitivity"
+            # Interference is to blame only if the frame would have been received without it.
+            heard_alone = self._sinr_db(wanted_dbm, []) >= self.cfg.capture_threshold_db
+            reason = "collision" if interf_dbm and heard_alone else "below_sensitivity"
             return RxVerdict(receiver.node_id, False, wanted_dbm, sinr, 1.0, reason, delivery_us)
         per = self.cfg.error_model.per(sinr, len(f.payload), f.rate_mbps)
         loss = self._link_loss(f.src_node, receiver.node_id)

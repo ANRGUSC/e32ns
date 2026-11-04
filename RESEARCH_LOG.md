@@ -815,8 +815,9 @@ by distance), a wall between neighbours 10 and 11, and 30 % extra loss on statio
 | 10–11 | 0 delivered (22 below sensitivity, 6 collisions counted at −120 dBm) |
 | 20–AP | 35 frames, 20 needed retries (up to 5 attempts), all delivered; HTTP 200 continues |
 
-The collisions on 10–11 are frames 11 could not have received anyway: the receiver's verdict
-lists every interferer even when the wanted signal is a wall.
+The collisions on 10–11 are frames 11 could not have received anyway: the verdict blamed
+interference whenever any overlapped, even when the wanted signal is a wall. D-041 labels them
+`below_sensitivity`.
 
 ---
 
@@ -921,6 +922,51 @@ the scenario's `name`); re-run properly, D-037's and D-038's identity claims hol
 
 ---
 
+## D-041 — A live view of a running experiment; a frame too weak to hear is not a collision
+
+**Context.** The PDF's GUI should visualize "packet exchanges, node output, link quality, and
+failures"; since D-033 that was a replay, available only after the run. Cooja shows the network
+as it runs.
+
+**Decision.** `esp-netsim run --live` serves the replay page on 127.0.0.1 (stdlib `http.server`
+on its own thread) while the run is in progress. The page polls `run.json` once a second and asks
+only for what it lacks: verdicts past the count it holds and console text past each node's
+length. It draws nodes, links coloured by delivery so far, frames flashing as they land, and the
+consoles, following the newest virtual time unless the viewer scrubs back. After the run the server keeps
+serving the final state until Ctrl+C. One page serves both modes, so the replay and the live view
+cannot drift apart.
+
+The first version re-sent everything on each poll. On a 30 s, 20-node run that is 51,000
+verdicts a second by the end, and encoding them holds the GIL the barrier thread needs: the
+effective quantum went from 2.25 ms (no view) to 2.45 ms. Incremental polling gives 2.30 ms,
+within run-to-run spread.
+
+**A labelling bug the view exposed.** The map was mostly red. A receiver whose SINR missed the
+capture threshold was labelled `collision` whenever any frame overlapped, including bystanders a
+kilometre away that could not have heard the frame alone. Now `collision` means the frame would
+have been received without the interference; otherwise it is `below_sensitivity`. Delivery is
+unchanged and no random draw moves, so seeded runs differ only in that label. The map also leaves
+off a broadcast's verdicts for out-of-range bystanders (the totals still count them); a unicast
+that misses its intended receiver stays, so M4's far station still shows red.
+
+**Checked.** 73 tests, two new: a weak frame under interference is `below_sensitivity`; the live
+server returns 503 before the run, the run while it goes, only the tail when asked, and the final
+state marked done. In Chrome on the 20-node scenario at 30 s: consoles stream from boot, the
+overrides of V-017 show as drawn links (1–13) and a missing one (10–11), and losses flash red.
+Mock scenarios: `results.json`, `trace.pcapng` and stdout byte-identical to before.
+
+---
+
+## V-019 — M4 carries DNS, DHCP, TCP and HTTP over the modeled link
+
+PDF component 5 asks for real DNS, TCP, UDP and HTTP. Counting the 802.11 data frames in
+`out/m4_wifi_gateway/trace.pcapng` (10 s, three stations): DHCP 8 (UDP 67/68), DNS 4 (UDP 53, one
+lookup per near station before lwIP caches it), HTTP 84 (TCP 80), ARP 20, plus 20 management
+frames (D-039; 8 are the far station's failed probes). Every one crossed the medium with its
+loss and retries.
+
+---
+
 # PART II — Current-state reference
 
 ## Appendix A — Architecture
@@ -956,6 +1002,7 @@ the scenario's `name`); re-run properly, D-037's and D-038's identity claims hol
 - `channel.py`: log-distance path loss (D-006), SNR→PER (D-007), 802.11 DCF airtime (D-008).
 - `orchestrator/wifi_link.py`: per station, probe/auth/assoc with the AP on a connect request
   (D-039), then each Ethernet frame as an 802.11 data frame to or from the AP (D-032).
+- `trace/report.py`/`report.html`: the replay page, also served live during a run (D-033, D-041).
 - `editor.py`/`editor.html`: the topology editor (D-036).
 
 **Determinism.** One seeded RNG. A mock-only run is a pure function of scenario and seed. A run
@@ -1007,14 +1054,14 @@ frames on the station's NIC, ethertype 0x88B5, intercepted by the bridge (`wifi_
 | M3 | Several nodes, configurable ESP-NOW connectivity, traces | done | `m3_espnow_line`: delivery falls off with distance, carrier sense and hidden terminals (D-031) |
 | M4 | Wi-Fi to the real Internet and back | done | `m4_wifi_gateway`: HTTP 200 near, retries at the edge, no association out of range (D-032, D-039) |
 | M5 | Config file launches all nodes, collects results | done | `esp-netsim run` (D-033) |
-| M6 | GUI: nodes, links, packets, console | done as a replay page | `out/<name>/report.html` (D-033) |
+| M6 | GUI: nodes, links, packets, console | done, live and as a replay | `esp-netsim run --live`, `out/<name>/report.html` (D-033, D-041) |
 | — | GUI topology editing (brief: "configuring topology") | done | `esp-netsim edit` (D-036) |
 | — | Per-link RSSI and loss (brief: "link qualities such as RSSI, packet loss, or distance") | done | `links:` in `example_20_nodes` (D-038, V-017) |
 
 Scenarios with firmware: `m2_two_qemu`, `m3_espnow_line`, `m4_wifi_gateway`, `example_20_nodes`,
 `hw_txprobe`, `hw_ab`; mock-only: `two_node`, `multi_node_espnow`.
 
-Tests: 71 (medium, barrier, wire codec, config, trace, Wi-Fi bridge, editor, runner end to end).
+Tests: 73 (medium, barrier, wire codec, config, trace, Wi-Fi bridge, editor, runner end to end).
 
 Hardware: send-callback timing and retry count on two boards (V-014, V-015); A/B RTT vs payload
 on two boards together (V-016). PDR vs distance is out of scope for this phase (decided
@@ -1031,8 +1078,7 @@ no WPA2 handshake, beacons or scan time (D-039); no station-to-station traffic t
    Then `-icount` or a run-to-next-event barrier for the ~0.5 ms QMP floor.
 2. Station-to-station traffic through one shared AP (one slirp per station today, D-032).
 3. WPA2 four-way handshake and beacons (D-039).
-4. A live (not replay) view of a running experiment.
-5. PDR vs distance on boards moved apart, to fit `path_loss_exponent`, `tx_power_dbm` and
+4. PDR vs distance on boards moved apart, to fit `path_loss_exponent`, `tx_power_dbm` and
    `noise_figure_db` (out of scope for now).
 
 ## Appendix D — Runbook (Linux or WSL2)

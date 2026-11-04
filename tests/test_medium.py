@@ -100,6 +100,16 @@ def test_encrypted_unicast_requires_matching_lmk():
 
 # ---- collision / SINR ------------------------------
 
+def test_too_weak_to_hear_is_not_a_collision():
+    # Node 4 is 1 km from node 1: below sensitivity whether or not node 2 is also on the air.
+    eng = make_engine()
+    eng.add_node(1, MAC1, x=0)
+    eng.add_node(2, MAC2, x=1000)
+    eng.add_node(4, "aa:bb:cc:00:00:04", x=1000.5)
+    outs = eng.process_batch([frame(1, MAC1, BROADCAST_MAC), frame(2, MAC2, BROADCAST_MAC)])
+    assert [r.reason for r in outs[0].receivers if r.node_id == 4] == ["below_sensitivity"]
+
+
 def test_hidden_terminals_collide_at_shared_receiver():
     # 140 m apart the senders cannot hear each other (-84 dBm < -82 dBm CCA), so both
     # transmit at once; SINR ~ 0 dB at the receiver in the middle -> collision.

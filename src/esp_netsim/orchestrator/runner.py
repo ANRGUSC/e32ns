@@ -8,12 +8,13 @@ import shutil
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Optional
 
 from ..config.schema import ScenarioConfig
 from ..medium import AP_NODE_ID, TxOutcome
 from ..nodes.mock_node import MockNode
 from ..trace.pcapng import PcapngWriter, trace_hook
-from ..trace.report import write_report
+from ..trace.report import LiveView, read_logs, write_report
 from . import qemu_launcher, wifi_link
 from .simulation import Simulation, SimStats
 
@@ -52,7 +53,8 @@ def _mock_nodes(scenario: ScenarioConfig, port: int) -> dict[int, MockNode]:
     return nodes
 
 
-async def _run_nodes(scenario: ScenarioConfig, sim: Simulation, out: Path) -> SimStats:
+async def _run_nodes(scenario: ScenarioConfig, sim: Simulation, out: Path,
+                     uart_logs: dict[int, Path]) -> SimStats:
     port = await sim.start()
     mocks = _mock_nodes(scenario, port)
     qemu: list[qemu_launcher.QemuNode] = []
@@ -63,6 +65,7 @@ async def _run_nodes(scenario: ScenarioConfig, sim: Simulation, out: Path) -> Si
                 if n.firmware:
                     q = await qemu_launcher.launch(n, port, Path(workdir))
                     qemu.append(q)
+                    uart_logs[q.node_id] = q.uart_log
                     sim.qemu_nodes[q.node_id] = q.qmp
                     if n.wifi:
                         pumps += await wifi_link.bridge(sim, n, scenario.ap, q.wifi_sockets)
@@ -85,8 +88,8 @@ async def _run_nodes(scenario: ScenarioConfig, sim: Simulation, out: Path) -> Si
             await m.close()
 
 
-def write_results(scenario: ScenarioConfig, result: RunResult) -> dict:
-    """Write results.json: topology, aggregate stats, and every per-receiver verdict."""
+def results_doc(scenario: ScenarioConfig, stats: SimStats, events: list) -> dict:
+    """Topology, aggregate stats, and every per-receiver verdict: the content of results.json."""
     nodes = [{"id": n.node_id, "mac": n.mac, "pos": [n.x, n.y], "channel": n.channel,
               "firmware": Path(n.firmware).parent.name if n.firmware else "mock"}
              for n in scenario.nodes]
@@ -94,22 +97,29 @@ def write_results(scenario: ScenarioConfig, result: RunResult) -> dict:
         ap = scenario.ap
         nodes.append({"id": AP_NODE_ID, "mac": ap.mac, "pos": [ap.x, ap.y],
                       "channel": ap.channel, "firmware": "access point"})
-    doc = {"name": scenario.name, "duration_us": scenario.duration_us,
-           "slice_us": scenario.slice_us, "nodes": nodes,
-           "stats": asdict(result.stats), "events": result.events}
-    (result.out_dir / "results.json").write_text(json.dumps(doc, indent=1))
-    return doc
+    return {"name": scenario.name, "duration_us": scenario.duration_us,
+            "slice_us": scenario.slice_us, "nodes": nodes, "stats": asdict(stats), "events": events}
 
 
-async def run_scenario(scenario: ScenarioConfig) -> RunResult:
+async def run_scenario(scenario: ScenarioConfig, live: Optional[LiveView] = None) -> RunResult:
+    """Run every node to the scenario's duration and write out_dir; feed `live` as it goes."""
     out = Path(scenario.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     sim = Simulation(scenario.build_engine(), scenario.slice_us)
     events: list[dict] = []
     sim.outcome_hooks.append(lambda o: events.extend(outcome_rows(o)))
+    uart_logs: dict[int, Path] = {}
+    if live:
+        # Runs on the view's thread; it only slices the tail of the list the barrier appends to.
+        live.state = lambda: {**results_doc(scenario, sim.stats, events),
+                              "now_us": min(sim.now_us, scenario.duration_us),
+                              "logs": read_logs(uart_logs)}
     with open(out / "trace.pcapng", "wb") as trace_fp:
         sim.outcome_hooks.append(trace_hook(PcapngWriter(trace_fp, scenario.name)))
-        stats = await _run_nodes(scenario, sim, out)
-    result = RunResult(stats, out, events)
-    write_report(out, write_results(scenario, result))
-    return result
+        stats = await _run_nodes(scenario, sim, out, uart_logs)
+    results = results_doc(scenario, stats, events)
+    (out / "results.json").write_text(json.dumps(results, indent=1))
+    run = write_report(out, results)
+    if live:
+        live.state = lambda: {**run, "now_us": scenario.duration_us, "done": True}
+    return RunResult(stats, out, events)

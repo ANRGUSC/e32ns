@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import urllib.error
+import urllib.request
 
 from esp_netsim.medium import MediumEngine, MediumConfig
 from esp_netsim.channel import ConstantErrorModel
@@ -10,6 +12,7 @@ from esp_netsim.nodes.mock_node import MockNode
 from esp_netsim.protocol import BROADCAST_MAC
 from esp_netsim.config.schema import parse_scenario
 from esp_netsim.orchestrator.runner import run_scenario
+from esp_netsim.trace.report import LiveView
 
 MAC1 = "aa:bb:cc:00:00:01"
 MAC2 = "aa:bb:cc:00:00:02"
@@ -113,3 +116,31 @@ async def test_run_scenario_writes_results(tmp_path):
     assert [(e["src"], e["rx"], e["delivered"]) for e in saved["events"]] == [(1, 2, True)] * 3
     assert (tmp_path / "trace.pcapng").stat().st_size > 0
     assert '"name": "t"' in (tmp_path / "report.html").read_text(encoding="utf-8")
+
+
+def _get(url: str) -> tuple[int, bytes]:
+    try:
+        with urllib.request.urlopen(url) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, b""
+
+
+async def test_live_view_serves_the_run_while_it_goes(tmp_path):
+    live = LiveView(0)
+    assert _get(live.url + "run.json")[0] == 503
+    assert b'const DATA = "live"' in _get(live.url)[1]
+    doc = {"name": "live",
+           "nodes": [{"id": 1, "mac": MAC1, "pos": [0, 0]}, {"id": 2, "mac": MAC2, "pos": [5, 0]}],
+           "run": {"duration_us": 400_000, "out_dir": str(tmp_path)},
+           "traffic": [{"node": 1, "at_us": 1000, "count": 40, "period_us": 10_000}]}
+    run = asyncio.create_task(run_scenario(parse_scenario(doc), live))
+    await asyncio.sleep(0.2)
+    status, body = await asyncio.to_thread(_get, live.url + "run.json")
+    assert status == 200 and json.loads(body)["now_us"] <= 400_000
+    await run
+    final = json.loads((await asyncio.to_thread(_get, live.url + "run.json"))[1])
+    assert final["done"] and len(final["events"]) == 40
+    tail = json.loads((await asyncio.to_thread(_get, live.url + "run.json?events=38"))[1])
+    assert tail["events"] == final["events"][38:]
+    live.server.shutdown()

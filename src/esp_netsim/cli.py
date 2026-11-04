@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import time
 import webbrowser
 from importlib.metadata import version
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 from . import editor
 from .config.schema import load_scenario
 from .orchestrator.runner import run_scenario
+from .trace.report import LiveView
 
 
 def _cmd_validate(args) -> int:
@@ -32,7 +34,11 @@ def _cmd_run(args) -> int:
     qemu = sum(1 for n in sc.nodes if n.firmware)
     print(f"Running '{sc.name}': {len(sc.nodes)} nodes ({qemu} QEMU, {len(sc.nodes) - qemu} mock), "
           f"{sc.duration_us} us @ {sc.slice_us} us slices (seed {sc.seed})...")
-    result = asyncio.run(run_scenario(sc))
+    live = LiveView(args.port) if args.live else None
+    if live:
+        print(f"live view      : {live.url}", flush=True)
+        webbrowser.open(live.url)
+    result = asyncio.run(run_scenario(sc, live))
     s = result.stats
     print(f"slices run     : {s.slices} (effective quantum {sc.duration_us // s.slices} us "
           "of virtual time)")
@@ -45,6 +51,13 @@ def _cmd_run(args) -> int:
         print(f"  node {n.node_id} ({kind}, {n.mac}): sent {sent}, received {got}")
     print(f"results        : {result.out_dir}/ (trace.pcapng, results.json, node logs)")
     print(f"replay         : {result.out_dir / 'report.html'}")
+    if live:
+        print("live view stays up with the final state; Ctrl+C to exit", flush=True)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
     return 0
 
 
@@ -68,6 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("run", help="run a scenario end to end")
     pr.add_argument("scenario", help="path to scenario YAML")
+    pr.add_argument("--live", action="store_true", help="watch the run in a browser as it happens")
+    pr.add_argument("--port", type=int, default=8766, help="port for --live")
     pr.set_defaults(func=_cmd_run)
 
     pv = sub.add_parser("validate", help="validate a scenario file")

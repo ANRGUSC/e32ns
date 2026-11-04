@@ -17,9 +17,9 @@ its Appendix C is the current status.
 | M1 a node boots, UART captured | any firmware scenario; `out/<name>/nodeN.log` |
 | M2 two nodes, controlled delivery and loss | `configs/m2_two_qemu.yaml` |
 | M3 multi-node ESP-NOW with traces | `configs/m3_espnow_line.yaml` |
-| M4 Wi-Fi station to the real Internet, with association | `configs/m4_wifi_gateway.yaml` |
+| M4 Wi-Fi station to the real Internet (association, DHCP, DNS, HTTP) | `configs/m4_wifi_gateway.yaml` |
 | M5 a config file launches every node and collects results | `esp-netsim run <scenario>` |
-| M6 nodes, links, packets and consoles | `out/<name>/report.html`, a replay of each run |
+| M6 nodes, links, packets and consoles | `esp-netsim run --live` while it runs; `out/<name>/report.html` after |
 | topology editing | `esp-netsim edit <scenario>` |
 | per-link RSSI and loss | `links:` in a scenario |
 | the 20-node example workflow | `configs/example_20_nodes.yaml` |
@@ -49,7 +49,9 @@ export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH   # only if setup fetch
 esp-netsim run configs/m2_two_qemu.yaml
 ```
 
-`esp-netsim validate <scenario>` checks a file without running it. `configs/hw_ab.yaml` and
+Add `--live` to watch a run in the browser as it happens: the same page as the replay, following
+the newest virtual time, served on `http://127.0.0.1:8766/` (`--port` to change). It stays up with
+the final state until Ctrl+C. `esp-netsim validate <scenario>` checks a file without running it. `configs/hw_ab.yaml` and
 `configs/hw_txprobe.yaml` repeat the board measurements in the emulator; `hw_ab` also needs
 `idf.py -C firmware/examples/espnow_ping -B firmware/examples/espnow_ping/build_<n> -DPING_LEN=<n>
 build` for n = 128 and 250.
